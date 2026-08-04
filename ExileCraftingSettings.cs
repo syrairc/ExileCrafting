@@ -41,6 +41,9 @@ public class ExileCraftingSettings : ISettings
     // the user's curated script list - drawn in the crafter dialog, not the settings menu
     [IgnoreMenu] public List<ScriptEntry> Scripts { get; set; } = new();
 
+    // bundled examples already copied into the scripts folder, so a deleted one doesn't come back
+    [IgnoreMenu] public HashSet<string> SeededExamples { get; set; } = new();
+
     // drawn by hand in the Sounds tab. one entry per CraftSound, padded on read.
     [IgnoreMenu] public List<SoundSlot> SoundSlots { get; set; } = new();
     [IgnoreMenu] public RangeNode<int> SoundThrottleMs { get; set; } = new(2000, 0, 10000);

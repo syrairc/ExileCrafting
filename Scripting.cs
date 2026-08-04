@@ -44,6 +44,31 @@ public sealed class ScriptHost
         Directory.CreateDirectory(_scriptsDirectory);
     }
 
+    // scripts live in config, but the bundled examples ship next to the dll, so they'd never show up
+    // in the add picker. copy each one across once and remember it, so deleting one makes it stay
+    // gone while a new example in a later version still arrives.
+    public void SeedExamples(HashSet<string> seeded)
+    {
+        try
+        {
+            var folder = Path.Combine(ExileCrafting.Main.DirectoryFullName, "examples");
+            if (!Directory.Exists(folder)) return;
+
+            foreach (var source in Directory.GetFiles(folder, "*.csx"))
+            {
+                var name = Path.GetFileName(source);
+                if (!seeded.Add(name)) continue;
+
+                var destination = Path.Combine(_scriptsDirectory, name);
+                if (!File.Exists(destination)) File.Copy(source, destination);
+            }
+        }
+        catch
+        {
+            // no examples folder, or it's locked - the plugin just starts with an empty script list
+        }
+    }
+
     public IReadOnlyList<string> DiscoverScripts() =>
         Directory.GetFiles(_scriptsDirectory, "*.csx")
             .Select(Path.GetFileName)

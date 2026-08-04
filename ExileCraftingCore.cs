@@ -55,6 +55,7 @@ public class ExileCrafting : BaseSettingsPlugin<ExileCraftingSettings>
     {
         Main = this;
         ScriptHost = new ScriptHost(Path.Combine(ConfigDirectory, "Scripts"));
+        ScriptHost.SeedExamples(Settings.SeededExamples);
         return true;
     }
 
