@@ -105,7 +105,11 @@ public static class SortableTable
             for (int c = 0; c < columns.Length; c++)
             {
                 ImGui.TableNextColumn();
+                // and per-column too, since Draw is a free callback - two columns sharing one cell
+                // helper would otherwise draw the same widget id twice in a row and share its state
+                ImGui.PushID(c);
                 columns[c].Draw?.Invoke(items[i], i);
+                ImGui.PopID();
             }
             ImGui.PopID();
         }

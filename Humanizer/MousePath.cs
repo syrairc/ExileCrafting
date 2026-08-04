@@ -17,7 +17,7 @@ public sealed class HumanizerConfig
     public int StepDelayMax = 9;
 
     public int PreClickSettleMin = 20, PreClickSettleMax = 60;
-    public int ClickDwellMin = 40, ClickDwellMax = 90;
+    public int ClickDwellMin = 25, ClickDwellMax = 45;
     public int PostClickSettleMin = 30, PostClickSettleMax = 90;
 }
 

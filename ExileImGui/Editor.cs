@@ -346,6 +346,36 @@ public static class Editor
         return text.Replace("\t", new string(' ', Math.Max(1, tabWidth)));
     }
 
+    /// <summary>
+    /// Where a caret sitting in <paramref name="text"/> ends up once <see cref="ExpandTabs"/> has run
+    /// over it. Both the argument and the result are utf-8 BYTE offsets, since that is what ImGui's
+    /// callback deals in.
+    /// <para>
+    /// Without this the whole-buffer replace that does the expansion parks the caret at the end of
+    /// the document - imgui's own DeleteChars/InsertChars walk CursorPos along with the edit - so
+    /// pressing Tab to indent would fling you to the bottom of the file.
+    /// </para>
+    /// </summary>
+    public static int ExpandTabsCaret(string text, int caretBytes, int tabWidth)
+    {
+        text ??= "";
+        if (caretBytes <= 0) return Math.Max(0, caretBytes);
+        int w = Math.Max(1, tabWidth);
+        int seen = 0;    // bytes of the original walked so far
+        int shift = 0;   // extra bytes the expansion put in ahead of the caret
+        for (int i = 0; i < text.Length && seen < caretBytes; i++)
+        {
+            char c = text[i];
+            if (c == '\t') { seen++; shift += w - 1; continue; }
+            // utf-8 byte length of this char, surrogate pair counted once as 4
+            if (char.IsHighSurrogate(c) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1])) { seen += 4; i++; }
+            else if (c < 0x80) seen += 1;
+            else if (c < 0x800) seen += 2;
+            else seen += 3;
+        }
+        return caretBytes + shift;
+    }
+
     // per-id retained view state. same shape as ListEditor._filters - two editors sharing an id
     // share their popup, find text and scroll, so give each one its own.
     internal sealed class State
@@ -378,6 +408,10 @@ public static class Editor
         public int PendingEditRemove;      // chars to delete from PendingEditAt first, int.MaxValue means to the end
         public string PendingEditInsert;   // text to put in their place
         public int PendingEditBaseLen = -1;   // byte length of the text the edit above was computed against - see PendingEditStale
+        // where the caret should land once the edit above has been applied, given where it was
+        // before. null leaves imgui's own answer alone, which for a whole-buffer replace is the
+        // end of the document - fine for a SetText, very much not for a tab expansion.
+        public Func<int, int> PendingEditCaretMap;
 
         // a whole-buffer replace queued by Editor.SetText, kept separate from the edit channel above
         // because it has to survive an unfocused frame. held until we actually see it land - see the
@@ -386,13 +420,15 @@ public static class Editor
 
         // sets all three together so a caller can't set two and leave the third stale from
         // a previous edit.
-        public void SetPendingEdit(int at, int remove, string insert)
+        public void SetPendingEdit(int at, int remove, string insert, Func<int, int> caretMap = null)
         {
             PendingEditAt = at;
             PendingEditRemove = remove;
             PendingEditInsert = insert;
+            PendingEditCaretMap = caretMap;
         }
 
+        public float ChildScrollY;             // the scrolling child's own scroll last frame
         public bool FollowCaret;               // scroll the caret back into view later this same Draw
         public int CaretLine;
         public bool Focused;           // whether the input had focus last frame
@@ -408,6 +444,13 @@ public static class Editor
         public char Trigger;
         public bool CompleteFailed;
         public bool SuppressPopupReopen;   // set by CommitCompletion, consumed by UpdatePopup the same frame
+
+        // popup scrolling. the window only moves for the arrow keys and the wheel - a hover sets
+        // Sel and nothing else, which is what stopped the list running away under a resting mouse.
+        public int PopupScroll;        // first visible row
+        public int PopupSelShown;      // the Sel the window was last moved for, so an unchanged Sel never drags it back
+        public float PopupWheelAcc;    // leftover fractional wheel, so a trackpad's small deltas add up instead of rounding to nothing
+        public Vector2 PopupMin, PopupMax;   // last frame's popup rect, for claiming the wheel before the child scrolls with it
 
         // the native buffer imgui reads and writes directly - persists across frames so it can
         // grow instead of getting rebuilt (and re-encoded) every single one. AllocHGlobal'd, so
@@ -557,12 +600,23 @@ public static class Editor
                 // rather than deleting and then finding out the insert has nowhere to go.
                 if (EditFits(n, d.BufSize, rm, insertBytes))
                 {
+                    // grabbed before the edit: DeleteChars pulls CursorPos back to the delete
+                    // point and InsertChars pushes it past everything inserted there, so after a
+                    // whole-buffer replace imgui's own answer is always "end of document".
+                    int caretBefore = d.CursorPos;
                     if (rm > 0) d.DeleteChars(at, rm);
                     if (insert.Length > 0) d.InsertChars(at, insert);
                     n = d.BufTextLen;
+                    if (s.PendingEditCaretMap != null)
+                    {
+                        int c = Math.Clamp(s.PendingEditCaretMap(caretBefore), 0, n);
+                        d.CursorPos = c;
+                        d.SelectionStart = d.SelectionEnd = c;
+                    }
                 }
             }
             s.PendingEditAt = -1;
+            s.PendingEditCaretMap = null;
         }
 
         // also Draw-side requests rather than CallbackAlways-only, so they land on a Tab frame
@@ -877,7 +931,12 @@ public static class Editor
                 if (Rank(word, s.Raw[i].Insert) == 0) s.Items.Add(s.Raw[i]);
             for (int i = 0; i < s.Raw.Count && s.Items.Count < MaxCompletionItems; i++)
                 if (Rank(word, s.Raw[i].Insert) > 0) s.Items.Add(s.Raw[i]);
+            // a fresh list starts at the top, and the scroll goes with it - keeping the old row
+            // window over a list that is now a different length shows the wrong rows for a frame.
             s.Sel = 0;
+            s.PopupSelShown = 0;
+            s.PopupScroll = 0;
+            s.PopupWheelAcc = 0f;
         }
 
         s.PopupOpen = s.Items.Count > 0;
@@ -932,7 +991,14 @@ public static class Editor
         {
             string expanded = ExpandTabs(text, o.TabWidth);
             if (expanded != text)
-                s.SetPendingEdit(0, int.MaxValue, expanded);
+            {
+                // the caret map is the whole point here: without it the replace below dumps the
+                // caret at the end of the document, so Tab-to-indent flings you to the bottom of
+                // the file. one closure per frame, but only on the frames a tab actually exists.
+                string src = text;
+                int w = o.TabWidth;
+                s.SetPendingEdit(0, int.MaxValue, expanded, c => ExpandTabsCaret(src, c, w));
+            }
         }
 
         var style = ImGui.GetStyle();
@@ -986,6 +1052,15 @@ public static class Editor
         // scrolling host window would otherwise still float its popup over whatever is visible there.
         var childOrigin = ImGui.GetCursorScreenPos();
         bool editorVisible = ImGui.IsRectVisible(childOrigin, childOrigin + size);
+
+        // a wheel notch over the popup belongs to the popup, not to the text under it. imgui applies
+        // the wheel to the hovered window inside the BeginChild below, so the only way to keep the
+        // code from scrolling too is to pin the child's scroll for this frame before it begins -
+        // SetScrollY after the fact lands a frame later and shows one frame of the scroll it undoes.
+        // x stays -1, "leave this axis alone".
+        if (s.PopupOpen && ImGui.GetIO().MouseWheel != 0f
+            && ImGui.IsMouseHoveringRect(s.PopupMin, s.PopupMax, false))
+            ImGui.SetNextWindowScroll(new Vector2(-1f, s.ChildScrollY));
 
         ImGui.BeginChild("##ed", size, ImGuiChildFlags.Border, ImGuiWindowFlags.HorizontalScrollbar);
         try
@@ -1116,6 +1191,7 @@ public static class Editor
         if (changed) { text = ReadNativeBuf(s); s.NativeBufText = text; }
         s.CancelCaretMove = false;   // an unconsumed cancel must not outlive its frame
         s.PendingEditAt = -1;        // ditto for an edit that never got applied this frame
+        s.PendingEditCaretMap = null;
         s.SelectFrom = -1;           // ditto for a selection request the callback never saw
         var (caretLn, caretCol) = CaretLineCol(s.Lines, s.Caret);
         s.CaretLine = caretLn;
@@ -1160,6 +1236,8 @@ public static class Editor
 
             s.FollowCaret = false;
         }
+
+        s.ChildScrollY = ImGui.GetScrollY();   // what the wheel claim above pins the child back to
         }
         finally
         {
@@ -1183,16 +1261,29 @@ public static class Editor
 
     const int PopupRows = 8;
 
+    // one wheel notch moves this many rows, same as a browser's list
+    const float PopupWheelRows = 3f;
+
     /// <summary>
-    /// Which row the popup's visible window starts at, so the selection stays inside a
-    /// <paramref name="cap"/>-row band once the list is longer than that. Centres the selection and
-    /// clamps at the ends. Pure, so it can be asserted without a live popup.
+    /// Which row the popup's visible window starts at. Scrolls the least it can to keep
+    /// <paramref name="sel"/> inside a <paramref name="cap"/>-row band, so a window already showing
+    /// the selection stays exactly where <paramref name="prevStart"/> left it. Pure, so it can be
+    /// asserted without a live popup.
+    /// <para>
+    /// Deliberately NOT a centring rule any more. Centring re-anchored the whole list on every
+    /// selection change, and since a hover also changes the selection, the row under a resting mouse
+    /// pointer kept becoming a different item - the list scrolled itself as fast as it could redraw.
+    /// </para>
     /// </summary>
-    public static int PopupScrollStart(int count, int sel, int cap)
+    /// <param name="prevStart">Where the window sat last frame. Clamped, so a stale one is safe.</param>
+    public static int PopupScrollStart(int count, int sel, int cap, int prevStart)
     {
         if (cap <= 0 || count <= cap) return 0;
         sel = Math.Clamp(sel, 0, count - 1);
-        return Math.Clamp(sel - cap / 2, 0, count - cap);
+        int start = Math.Clamp(prevStart, 0, count - cap);
+        if (sel < start) return sel;
+        if (sel >= start + cap) return sel - cap + 1;
+        return start;
     }
 
     // dropdown for the completion list, positioned under the word being completed. drawn straight
@@ -1223,8 +1314,31 @@ public static class Editor
         float pad = style.FramePadding.X;
         float gap = style.ItemSpacing.X;
 
-        int start = PopupScrollStart(s.Items.Count, s.Sel, PopupRows);
         int visible = Math.Min(PopupRows, s.Items.Count);
+        int maxScroll = Math.Max(0, s.Items.Count - visible);
+
+        // wheel scrolls the list without touching the selection, hit-tested against LAST frame's
+        // rect - this frame's is not known until the rows below have been measured, and the box
+        // does not move between frames anyway. Draw claims the same wheel off the child underneath
+        // so the code behind the popup does not scroll along with it.
+        float wheel = ImGui.GetIO().MouseWheel;
+        if (wheel != 0f && ImGui.IsMouseHoveringRect(s.PopupMin, s.PopupMax, false))
+        {
+            s.PopupWheelAcc += wheel * PopupWheelRows;
+            int rows = (int)s.PopupWheelAcc;
+            if (rows != 0) { s.PopupWheelAcc -= rows; s.PopupScroll -= rows; }
+        }
+        else s.PopupWheelAcc = 0f;
+
+        // and the keyboard drags the window only when the selection actually moved. a hover sets
+        // Sel to a row that is on screen by definition, so it never moves anything.
+        s.PopupScroll = Math.Clamp(s.PopupScroll, 0, maxScroll);
+        if (s.Sel != s.PopupSelShown)
+        {
+            s.PopupScroll = PopupScrollStart(s.Items.Count, s.Sel, PopupRows, s.PopupScroll);
+            s.PopupSelShown = s.Sel;
+        }
+        int start = Math.Clamp(s.PopupScroll, 0, maxScroll);
 
         // width off the widest visible row only, not the whole list - a provider can hand back
         // thousands of entries and this runs every frame.
@@ -1251,6 +1365,7 @@ public static class Editor
         min.X = Math.Max(min.X, 0f);
         min.Y = Math.Max(min.Y, 0f);
         var max = min + new Vector2(boxW, boxH);
+        s.PopupMin = min; s.PopupMax = max;   // next frame's wheel hit test, and Draw's wheel claim
 
         // hover moves the selection, same as the Selectable it replaces. click-to-commit is
         // skipped on purpose - this is a foreground draw, not a real window, so nothing here

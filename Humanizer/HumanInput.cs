@@ -33,9 +33,18 @@ public sealed class HumanInput
     public IEnumerator Click(MouseButtons button)
     {
         yield return new WaitTime(Range(_cfg.PreClickSettleMin, _cfg.PreClickSettleMax));
-        Down(button);
-        yield return new WaitTime(Range(_cfg.ClickDwellMin, _cfg.ClickDwellMax));
-        Up(button);
+
+        // finally, not a plain Up - a cancel disposes this mid-dwell and must not leave the button held
+        try
+        {
+            Down(button);
+            yield return new WaitTime(Range(_cfg.ClickDwellMin, _cfg.ClickDwellMax));
+        }
+        finally
+        {
+            Up(button);
+        }
+
         yield return new WaitTime(Range(_cfg.PostClickSettleMin, _cfg.PostClickSettleMax));
     }
 

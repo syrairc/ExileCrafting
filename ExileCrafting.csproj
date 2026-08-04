@@ -22,6 +22,16 @@
       <HintPath>$(exapiPackage)\GameOffsets.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <Reference Include="ItemFilterLibrary">
+      <HintPath>$(exapiPackage)\ItemFilterLibrary.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--the Sounds tab lists whatever wavs sit next to the dll, so they have to travel with it-->
+    <None Include="sounds\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="examples\**\*.csx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
