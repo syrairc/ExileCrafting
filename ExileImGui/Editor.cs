@@ -417,6 +417,7 @@ public static class Editor
         // because it has to survive an unfocused frame. held until we actually see it land - see the
         // block at the top of Draw.
         public string PendingSetText;
+        public int PendingSetCaret = -1;   // where the caret should land once it does, -1 leaves imgui's answer alone
 
         // sets all three together so a caller can't set two and leave the third stale from
         // a previous edit.
@@ -638,17 +639,16 @@ public static class Editor
             s.SelectFrom = -1;
         }
 
-        if (d.EventFlag == ImGuiInputTextFlags.CallbackCompletion)
-        {
-            CommitCompletion(s, d);
-            return 0;
-        }
-
-        // CallbackAlways from here down.
+        // mirrored before the completion branch, not just on the Always path - imgui raises one
+        // event per frame, and a Tab frame is Completion, so leaving this to the tail meant every
+        // tab press read the buffer back one byte short and clipped the last char off the document.
+        // CommitCompletion re-mirrors after its own edit.
         s.Caret = d.CursorPos;
         s.SelStart = d.SelectionStart;
         s.SelEnd = d.SelectionEnd;
         s.NativeTextLen = d.BufTextLen;
+
+        if (d.EventFlag == ImGuiInputTextFlags.CallbackCompletion) CommitCompletion(s, d);
         return 0;
     }
 
@@ -681,9 +681,9 @@ public static class Editor
         if (len > 0) d.DeleteChars(from, len);
         d.InsertChars(from, insert);
 
-        // this event returns before reaching the CallbackAlways tail above, so mirror it here -
-        // the popup and bracket match run later this same frame and need the caret where the
-        // commit just left it (past the inserted text), not one frame stale.
+        // re-mirror after our own edit - the caller already mirrored pre-commit values, and the
+        // popup and bracket match run later this same frame needing the caret where the commit
+        // left it (past the inserted text), not where it was before.
         s.Caret = d.CursorPos;
         s.SelStart = d.SelectionStart;
         s.SelEnd = d.SelectionEnd;
@@ -731,11 +731,49 @@ public static class Editor
     /// <param name="id">Safe for an id that has never been drawn - the state is created here and the
     /// id's first draw applies the edit. Safe to call twice before a draw too; the second call just
     /// replaces the first.</param>
-    public static void SetText(string id, string text)
+    /// <param name="caret">Where to leave the caret once the text lands, as an index into
+    /// <paramref name="text"/>. The default -1 keeps imgui's own answer, which for a whole-buffer
+    /// replace is the end of the document - right for loading a file, wrong for anything that only
+    /// rewrites part of one.</param>
+    public static void SetText(string id, string text, int caret = -1)
     {
         if (id == null) return;
         if (!_states.TryGetValue(id, out var s)) _states[id] = s = new State();
         s.PendingSetText = NormalizeLineEndings(text) ?? "";
+        s.PendingSetCaret = caret;
+    }
+
+    /// <summary>
+    /// Splices a snippet in at the caret, replacing the selection if there is one, and leaves the
+    /// caret just past what was inserted.
+    /// </summary>
+    /// <remarks>
+    /// Goes through <see cref="SetText"/> rather than the edit channel on purpose: a toolbar button
+    /// or a picker popup takes focus off the editor as it is clicked, and the edit channel only
+    /// survives while the widget is active.
+    /// </remarks>
+    /// <param name="text">The caller's buffer, rewritten in place.</param>
+    /// <param name="snippet">Null or empty does nothing.</param>
+    public static void Insert(string id, ref string text, string snippet)
+    {
+        if (id == null || string.IsNullOrEmpty(snippet)) return;
+
+        var current = text ?? "";
+
+        // an id that has never been drawn has no caret to speak of, so append
+        if (!_states.TryGetValue(id, out var s))
+        {
+            text = current + snippet;
+            SetText(id, text, text.Length);
+            return;
+        }
+
+        var from = Math.Clamp(Math.Min(s.SelStart, s.SelEnd), 0, current.Length);
+        var to = Math.Clamp(Math.Max(s.SelStart, s.SelEnd), from, current.Length);
+        if (from == to) from = to = Math.Clamp(s.Caret, 0, current.Length);
+
+        text = current.Substring(0, from) + snippet + current.Substring(to);
+        SetText(id, text, from + snippet.Length);
     }
 
     /// <summary>
@@ -956,19 +994,27 @@ public static class Editor
         bool externalSet = false;
         if (s.PendingSetText != null)
         {
+            int wantCaret = s.PendingSetCaret;
+
             if (text == s.PendingSetText)
             {
                 s.PendingSetText = null;   // landed, by whichever route
+                s.PendingSetCaret = -1;
             }
             else if (s.Focused)
             {
-                s.SetPendingEdit(0, int.MaxValue, s.PendingSetText);
+                s.SetPendingEdit(0, int.MaxValue, s.PendingSetText,
+                    wantCaret < 0 ? null : _ => wantCaret);
             }
             else
             {
                 text = s.PendingSetText;
                 s.PendingSetText = null;
+                s.PendingSetCaret = -1;
                 externalSet = true;
+                // nothing is running the callback, so park the caret ourselves - imgui reads it
+                // back off this state the next time the widget goes active.
+                if (wantCaret >= 0) s.Caret = s.SelStart = s.SelEnd = Math.Clamp(wantCaret, 0, text.Length);
             }
         }
 
