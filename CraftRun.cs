@@ -43,7 +43,8 @@ public sealed class CraftContext
     int _applications;
     double _spentChaos;
     TimeSpan _paused;
-    DateTime? _askingSince;
+    DateTime? _clockStoppedAt;
+    int _clockHolds;
 
     public CraftContext(ClickExecutor executor, CancellationToken token, int maxApplications, int maxSeconds,
         double maxChaos, CraftLog log)
@@ -67,7 +68,20 @@ public sealed class CraftContext
 
     public int MaxSeconds => _maxSeconds;
 
-    public TimeSpan Elapsed => (_askingSince ?? DateTime.UtcNow) - _startedAt - _paused;
+    public TimeSpan Elapsed => (_clockStoppedAt ?? DateTime.UtcNow) - _startedAt - _paused;
+
+    // a prompt and the pause hotkey can both hold the run clock, so it's a count, not a flag
+    public void StopClock()
+    {
+        if (_clockHolds++ == 0) _clockStoppedAt = DateTime.UtcNow;
+    }
+
+    public void StartClock()
+    {
+        if (_clockHolds == 0 || --_clockHolds > 0) return;
+        if (_clockStoppedAt is { } at) _paused += DateTime.UtcNow - at;
+        _clockStoppedAt = null;
+    }
 
     public IReadOnlyDictionary<string, int> Used => _used;
 
@@ -158,8 +172,7 @@ public sealed class CraftContext
         SetStatus("waiting for you");
         _log.Add($"asking: {message}");
 
-        var askedAt = DateTime.UtcNow;
-        _askingSince = askedAt;
+        StopClock();
 
         try
         {
@@ -169,8 +182,7 @@ public sealed class CraftContext
         }
         finally
         {
-            _paused += DateTime.UtcNow - askedAt;
-            _askingSince = null;
+            StartClock();
         }
     }
 
@@ -206,6 +218,39 @@ public sealed class CraftContext
         Count(currencyName, _executor.LastRunApplied);
         _log.Add(result ? $"{currencyName} run hit the condition." : $"{currencyName} run stopped short.");
         return result;
+    }
+
+    // one pickup, then alt swaps which orb is on the cursor between clicks. much faster than
+    // alternating ApplyCurrency calls, which walks back to the stash for every single orb.
+    public async Task<bool> ApplyPairUntil(string primary, string alternate, Func<bool> useAlternate, Func<bool> done)
+    {
+        if (useAlternate == null) throw new ArgumentNullException(nameof(useAlternate));
+        if (done == null) throw new ArgumentNullException(nameof(done));
+        _token.ThrowIfCancellationRequested();
+
+        SetStatus($"using {primary} and {alternate}");
+        _log.Add($"applying {primary} and {alternate} until the condition holds...");
+
+        var result = await _executor.ApplyPairUntil(primary, alternate, useAlternate, done,
+            ChargeApplication, name => Count(name, 1), _token);
+
+        _log.Add(result
+            ? $"{primary} and {alternate} run hit the condition."
+            : $"{primary} and {alternate} run stopped short.");
+
+        return result;
+    }
+
+    // alchemy only lands on a white item, so anything else gets scoured first
+    public Task<bool> AlchScourUntil(Func<bool> done) =>
+        ApplyPairUntil("Orb of Alchemy", "Orb of Scouring", () => Item.Rarity != ItemRarity.Normal, done);
+
+    // one reroll, leaving the item rare. two pickups rather than the shift dance, which only pays
+    // for itself when it repeats.
+    public async Task<bool> AlchScour()
+    {
+        if (Item.Rarity != ItemRarity.Normal && !await ApplyCurrency("Orb of Scouring")) return false;
+        return await ApplyCurrency("Orb of Alchemy");
     }
 
     // select the craft in the horticrafting station and press Craft once. the search text has to
@@ -821,6 +866,13 @@ public sealed class CraftLog
         foreach (var line in Lines)
             ImGui.TextUnformatted(line);
         ImGui.PopTextWrapPos();
+
+        // sits at the bottom because the view sticks there, so it's the one spot always on screen
+        if (Lines.Count > 0)
+        {
+            ImGui.Separator();
+            if (ImGui.SmallButton("Copy log")) ImGui.SetClipboardText(string.Join("\n", Lines));
+        }
 
         if (_summary != null)
         {

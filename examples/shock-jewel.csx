@@ -20,6 +20,18 @@
 //       .Result throws "already has an operation in flight" - it wants the same executor that is
 //       busy running this loop. No loss: CheckMods is CountMods plus a reading pause, and the
 //       loop already waits Action delay between clicks.
+//   await ctx.AlchScourUntil(() => ctx.CountMods("MapPlayerNoRegeneration") == 0)
+//       Rolls a map without putting the orb down: one Orb of Alchemy pickup, then ALT swaps it
+//       to an Orb of Scouring and back between clicks, so a miss is reset and rerolled without
+//       the mouse ever going back to the stash. Needs both orbs in the tab. Each is counted and
+//       priced separately. Stops on the condition, on running out, or on a limit.
+//   await ctx.AlchScour()
+//       One reroll: scours if the item is not white, then alchs once. Leaves it rare.
+//   await ctx.ApplyPairUntil("Orb of Alchemy", "Orb of Scouring", useAlternate, done)
+//       The general form. useAlternate() picks which of the two the next click needs, done()
+//       stops the run. Any two currencies that ALT-swap on the cursor work here. The swap is
+//       confirmed on the cursor before every click, so a wrong pairing stops the run rather
+//       than clicking the wrong orb onto your item.
 //   await ctx.ApplyHarvest("including a Lightning modifier")
 //       Harvest scripts only. Filters the station's craft list by that text and presses Craft.
 //       The text must match exactly one craft or it aborts and logs what it did match.
@@ -47,6 +59,8 @@
 // TELLING YOU THINGS
 //   ctx.Log("text")          - a line in the craft log, kept in the run summary
 //   ctx.SetStatus("text")    - the status line drawn on the game panel, overwritten as you go
+//       Everything Log writes can be lifted out with the Copy log button at the bottom of the
+//       craft panel, which is the quickest way to get a run's output into a message.
 //   ctx.PlaySound(CraftSound.Error)
 //       Error / Notification are yours to use. Succeeded / Failed / QueueComplete also fire on
 //       their own. Each one is enabled and assigned a wav in the Sounds settings tab.

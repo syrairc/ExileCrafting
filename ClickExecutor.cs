@@ -35,6 +35,12 @@ public sealed partial class ClickExecutor
     // these are the trimmed values - raise them again if a paste ever comes back empty.
     const int HarvestStepDelayMs = 250;
     const int HarvestKeyDelayMs = 120;
+    const int AltSwapTimeoutMs = 2000;
+
+    // the generic alt, matching how ControlKey and ShiftKey are used above. if the swap never
+    // lands in game, Keys.LMenu is the other one to try.
+    const Keys AltKey = Keys.Menu;
+
     const float AimSpread = 0.5f;
     const float JiggleRadius = 2f;
 
@@ -51,10 +57,18 @@ public sealed partial class ClickExecutor
     bool _result;
     bool _pollResult;
 
+    // pause holds off the next action instead of freezing this one - stopping mid-routine could
+    // leave the mouse button or shift held down
+    bool _routineStarted;
+
     // set by PrepareAndPickUp, read by whichever routine called it
     NormalInventoryItem _slot;
     long _startAddress;
     bool _prepared;
+
+    // set for the length of one pair run, so the alt toggle knows which name means "press alt"
+    string _alternate;
+    bool _altHeld;
 
     // which craft is selected in the station right now, so repeat calls are one click and no search
     string _selectedCraft;
@@ -67,6 +81,10 @@ public sealed partial class ClickExecutor
 
     public Task<bool> ApplyCurrencyUntil(string currencyName, Func<bool> done, Action charge, CancellationToken token) =>
         Start(token, ApplyCurrencyUntilRoutine(currencyName, done, charge));
+
+    public Task<bool> ApplyPairUntil(string primary, string alternate, Func<bool> useAlternate,
+        Func<bool> done, Action<string> charge, Action<string> applied, CancellationToken token) =>
+        Start(token, ApplyPairUntilRoutine(primary, alternate, useAlternate, done, charge, applied));
 
     public Task<bool> ApplyHarvest(string craftName, CancellationToken token) =>
         Start(token, ApplyHarvestRoutine(craftName));
@@ -111,6 +129,7 @@ public sealed partial class ClickExecutor
         _tcs = new TaskCompletionSource<bool>();
         _token = token;
         _waitRemainingMs = 0;
+        _routineStarted = false;
         _routine = routine;
         return _tcs.Task;
     }
@@ -131,6 +150,9 @@ public sealed partial class ClickExecutor
             cancelledTcs.TrySetCanceled(_token);
             return;
         }
+
+        if (!_routineStarted && ExileCrafting.Main.IsPaused) return;
+        _routineStarted = true;
 
         _waitRemainingMs -= deltaMs;
         if (_waitRemainingMs > 0) return;

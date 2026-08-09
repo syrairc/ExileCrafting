@@ -45,6 +45,10 @@ public class ExileCrafting : BaseSettingsPlugin<ExileCraftingSettings>
     // tells the dialog to render it as a normal stop rather than a crash
     public string RunningErrorDetail { get; private set; }
     public bool IsScriptRunning => _runTask != null;
+
+    // holds the run between actions, unlike the abort key which cancels it outright
+    public bool IsPaused { get; private set; }
+
     public bool IsCraftDialogOpen => _dialog.IsOpen;
 
     // ClickExecutor checks calls against this - scripts must resume on the main thread, since
@@ -82,13 +86,21 @@ public class ExileCrafting : BaseSettingsPlugin<ExileCraftingSettings>
         if (Settings.AbortHotkey.PressedOnce())
             CancelRunningScript();
 
+        if (Settings.PauseHotkey.PressedOnce())
+            TogglePause();
+
         if (RunningContext != null && _runTask != null)
-            RunningStatusText = _queue == null
+        {
+            var line = _queue == null
                 ? RunningContext.StatusText
                 : $"{_queue.Progress} - {RunningContext.StatusText}";
+            RunningStatusText = IsPaused ? $"Paused - {line}" : line;
+        }
 
         if (_runTask is { IsCompleted: true })
         {
+            IsPaused = false;
+
             // summary goes in first so it reads above the outcome line, and it runs for a cancelled
             // or failed craft too - that's exactly when you want to know what it burned. the queue
             // logs its own per item as it goes.
@@ -255,6 +267,17 @@ public class ExileCrafting : BaseSettingsPlugin<ExileCraftingSettings>
     public void OpenCraftDialog() => _dialog.IsOpen = true;
 
     public void CancelRunningScript() => _runCts?.Cancel();
+
+    public void TogglePause()
+    {
+        if (_runTask == null) return;
+
+        IsPaused = !IsPaused;
+        if (IsPaused) RunningContext?.StopClock(); else RunningContext?.StartClock();
+
+        StatusMessage = IsPaused ? "craft paused" : "craft resumed";
+        CraftLog.Add(IsPaused ? "paused - the current action finishes, then it holds." : "resumed.");
+    }
 
     public void ResetRunState()
     {

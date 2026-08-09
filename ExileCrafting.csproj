@@ -32,6 +32,9 @@
     <!--the Sounds tab lists whatever wavs sit next to the dll, so they have to travel with it-->
     <None Include="sounds\**\*.wav" CopyToOutputDirectory="PreserveNewest" />
     <None Include="examples\**\*.csx" CopyToOutputDirectory="PreserveNewest" />
+    <!--the editor's harvest craft picker reads this list off disk-->
+    <None Include="data\**\*.txt" CopyToOutputDirectory="PreserveNewest" />
+    <None Include="data\**\*.csx" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>

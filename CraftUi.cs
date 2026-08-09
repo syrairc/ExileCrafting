@@ -68,6 +68,9 @@ public sealed class CraftDialog
         if (plugin.IsScriptRunning)
         {
             if (ImGui.Button($"Cancel (Press {plugin.Settings.AbortHotkey.Value})")) plugin.CancelRunningScript();
+            ImGui.SameLine();
+            var pause = plugin.IsPaused ? "Resume" : "Pause";
+            if (ImGui.Button($"{pause} (Press {plugin.Settings.PauseHotkey.Value})")) plugin.TogglePause();
             return;
         }
 
@@ -100,7 +103,8 @@ public sealed class CraftDialog
         if (queued > 0) return;
 
         ImGui.SameLine();
-        ImGui.TextDisabled($"queue an item: hover an inventory cell, press {plugin.Settings.ToggleSlotHotkey.Value}");
+        ImGui.TextDisabled($"queue an item: hover an inventory cell, press {plugin.Settings.ToggleSlotHotkey.Value}, " +
+                           "press again to confirm");
     }
 
     void DrawLog(ExileCrafting plugin)
@@ -325,7 +329,7 @@ public sealed class CraftDialog
 // opens where the mouse is when you mark an inventory cell: one job's whole config, then it closes.
 public sealed class QueuePopover
 {
-    // remembered across opens so marking a run of similar items is hover, hotkey, Enter
+    // remembered across opens so marking a run of similar items is hover, hotkey, hotkey
     static string _lastFileName = "";
 
     int _cell = -1;
@@ -360,6 +364,16 @@ public sealed class QueuePopover
     }
 
     public void Close() => _cell = -1;
+
+    // second press of the queue hotkey is the Queue button. eats the press either way, otherwise it
+    // reopens the popover on the cell the mouse is still sitting on.
+    public bool AcceptHotkey(ExileCrafting plugin)
+    {
+        if (_cell < 0) return false;
+
+        if (!string.IsNullOrEmpty(_fileName)) Commit(plugin);
+        return true;
+    }
 
     public void Draw(ExileCrafting plugin)
     {
@@ -556,6 +570,7 @@ public static class CraftOverlay
 
         // PressedOnce consumes the press, so both pickers share one read
         var toggling = plugin.IsCraftDialogOpen && plugin.Settings.ToggleSlotHotkey.PressedOnce();
+        if (toggling && plugin.QueuePopover.AcceptHotkey(plugin)) toggling = false;
 
         // the station's bottom right corner sits way off to the side of the craft slot, so in harvest
         // the button hangs under the Craft button instead

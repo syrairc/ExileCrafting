@@ -1,3 +1,5 @@
+using ExileCore.PoEMemory.FilesInMemory;
+using ExileCore.Shared.Enums;
 using ExileImGui;
 using ImGuiNET;
 using Microsoft.CodeAnalysis.CSharp.Scripting;
@@ -10,6 +12,7 @@ using System.Linq;
 using System.Numerics;
 using System.Reflection;
 using System.Runtime.Loader;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using System;
 
@@ -550,6 +553,7 @@ public static class ScriptCompletion
 
 #endregion
 
+
 #region Script editor dialog
 
 public sealed class ScriptEditorDialog
@@ -559,6 +563,37 @@ public sealed class ScriptEditorDialog
     // Size is set per frame in Draw - zero height means fill whatever's left in the window
     readonly EditorOpts _editorOpts = new() { Tokenize = CSharp.Tokenize, Complete = ScriptCompletion.Complete };
     const string SaveAsPopupId = "Save Script As";
+    const string EditorId = "crafteditor";
+
+    const string InsertMenuId = "insertmenu";
+
+    enum Picker
+    {
+        None,
+        Mods,
+        Currency,
+        Harvest,
+        Snippets,
+    }
+
+    enum AffixFilter
+    {
+        All,
+        Prefix,
+        Suffix,
+    }
+
+    // one picker panel is open at a time, so its whole filter state lives here
+    Picker _picker;
+    string _pickFilter = "";
+    string _pickTag = AnyTag;
+    AffixFilter _pickAffix;
+    bool _openHarvestPicker;
+
+    // mods only: picked but not inserted yet
+    readonly List<string> _picked = new();
+
+    const string AnyTag = "All";
 
     string _fileName;
     string _text = "";
@@ -578,7 +613,7 @@ public sealed class ScriptEditorDialog
     {
         _fileName = fileName;
         _text = text;
-        Editor.SetText("crafteditor", text);
+        Editor.SetText(EditorId,text);
         _status = null;
         IsOpen = true;
     }
@@ -587,7 +622,7 @@ public sealed class ScriptEditorDialog
     {
         _fileName = null;
         _text = ScriptHost.NewScriptTemplate;
-        Editor.SetText("crafteditor", _text);
+        Editor.SetText(EditorId,_text);
         _status = null;
         IsOpen = true;
     }
@@ -642,15 +677,290 @@ public sealed class ScriptEditorDialog
                 ImGui.TextWrapped(_status);
         }
 
+        DrawInsertToolbar();
+
         ImGui.Separator();
 
         _editorOpts.Size = new Vector2(0, 0);
-        Editor.Code("crafteditor", ref _text, _editorOpts);
+        Editor.Code(EditorId, ref _text, _editorOpts);
 
         DrawSaveAsPopup(plugin);
 
         ExileImGui.Windows.End();
         IsOpen = open;
+    }
+
+    // pickers for the three strings scripts get wrong most often: mod names, currency base names and
+    // harvest craft text. currency is a split button because harvest crafting is the rarer of the two.
+    void DrawInsertToolbar()
+    {
+        if (Toggle("Insert Mod", Picker.Mods)) TogglePicker(Picker.Mods);
+        Controls.Tip("Search every item mod by name, id or what it does, tick as many as you want, " +
+                     "then insert. Those names are what ctx.CountMods and ctx.CheckMods match on.");
+
+        ImGui.SameLine();
+        if (Toggle("Insert Currency", Picker.Currency)) TogglePicker(Picker.Currency);
+        Controls.Tip("Search currency by base name, then drop it in. That's the name " +
+                     "ctx.ApplyCurrency looks for in the stash tab and your inventory.");
+
+        // split button: no spacing between the two halves, so they read as one control
+        ImGui.SameLine(0f, 1f);
+        if (ImGui.ArrowButton("##insertmore", ImGuiDir.Down)) ImGui.OpenPopup(InsertMenuId);
+
+        if (ImGui.BeginPopup(InsertMenuId))
+        {
+            // opening the panel from in here would fight the popup closing, so flag it and act below
+            if (ImGui.MenuItem("Insert Harvest Craft")) _openHarvestPicker = true;
+            ImGui.EndPopup();
+        }
+
+        ImGui.SameLine();
+        if (Toggle("Insert Snippet", Picker.Snippets)) TogglePicker(Picker.Snippets);
+        Controls.Tip("Drop a whole working block in at the caret - roll until a mod, bring an item " +
+                     "to rare, alch and scour a map. Add your own as .csx files in data/snippets.");
+
+        if (_openHarvestPicker)
+        {
+            _openHarvestPicker = false;
+            TogglePicker(Picker.Harvest);
+        }
+
+        DrawPickerPanel();
+    }
+
+    // the open picker's own button stays depressed, so it reads as the thing you're looking at
+    bool Toggle(string label, Picker picker)
+    {
+        if (_picker != picker) return ImGui.Button(label);
+
+        using (new EColor.StyleColorScope((ImGuiCol.Button, ImGui.GetColorU32(ImGuiCol.ButtonActive))))
+            return ImGui.Button(label);
+    }
+
+    void TogglePicker(Picker picker)
+    {
+        _picker = _picker == picker ? Picker.None : picker;
+        _pickFilter = "";
+        _pickTag = AnyTag;
+        _pickAffix = AffixFilter.All;
+        _picked.Clear();
+    }
+
+    const int MaxPickerRows = 300;
+
+    void DrawPickerPanel()
+    {
+        if (_picker == Picker.None) return;
+
+        var mods = _picker == Picker.Mods;
+
+        var (rows, hint, empty) = _picker switch
+        {
+            Picker.Mods => (ScriptSnippets.Mods(), "search mods by name, id or effect",
+                "no mods yet - the game files load a moment after you're in a zone."),
+            Picker.Currency => (ScriptSnippets.Currency(), "search currency",
+                "data/currency.txt is missing or empty."),
+            Picker.Snippets => (ScriptSnippets.Snippets(), "search snippets",
+                "data/snippets is missing or has no .csx files in it."),
+            _ => (ScriptSnippets.Harvest(), "search harvest crafts",
+                "data/harvest-crafts.txt is missing or empty."),
+        };
+
+        ImGui.BeginChild("##pickerpanel", new Vector2(0f, 340f), ImGuiChildFlags.Border);
+
+        if (rows.Count == 0)
+        {
+            ImGui.TextDisabled(empty);
+            ImGui.EndChild();
+            return;
+        }
+
+        var matches = Filter(rows, mods);
+
+        ImGui.SetNextItemWidth(-220f);
+        ImGui.InputTextWithHint("##pickfilter", hint, ref _pickFilter, 128);
+        ImGui.SameLine();
+        ImGui.TextDisabled("(?)");
+        Controls.Tip("Each space-separated word has to match somewhere in the row, in any order. " +
+                     "A word is treated as a regex when it is one.");
+        ImGui.SameLine();
+        ImGui.TextDisabled($"{matches.Count} of {rows.Count}");
+
+        DrawPickerFilters(rows, mods);
+
+        ImGui.Separator();
+
+        // the footer has to keep its room whatever the list does, so the rows get what's left
+        var footer = mods ? ImGui.GetFrameHeightWithSpacing() + ImGui.GetStyle().ItemSpacing.Y : 0f;
+        ImGui.BeginChild("##pickerrows", new Vector2(0f, -footer), ImGuiChildFlags.None);
+
+        // the child above owns the scrolling, the table just does the banding and the row rules
+        if (ImGui.BeginTable("##pickertable", 1, ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersInnerH))
+        {
+            var shown = 0;
+
+            foreach (var row in matches)
+            {
+                if (shown++ >= MaxPickerRows) break;
+
+                ImGui.TableNextRow();
+                ImGui.TableSetColumnIndex(0);
+                ImGui.PushID(row.Insert);
+                DrawPickerRow(row, mods);
+                ImGui.PopID();
+            }
+
+            if (matches.Count > MaxPickerRows)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableSetColumnIndex(0);
+                ImGui.TextDisabled($"{matches.Count - MaxPickerRows} more - narrow the search.");
+            }
+
+            if (matches.Count == 0)
+            {
+                ImGui.TableNextRow();
+                ImGui.TableSetColumnIndex(0);
+                ImGui.TextDisabled("nothing matches that.");
+            }
+
+            ImGui.EndTable();
+        }
+
+        ImGui.EndChild();
+
+        if (mods) DrawPickerFooter();
+
+        ImGui.EndChild();
+    }
+
+    void DrawPickerFilters(IReadOnlyList<ScriptSnippets.Row> rows, bool mods)
+    {
+        if (mods)
+        {
+            Controls.Segmented("##pickaffix", ref _pickAffix,
+                ("All", AffixFilter.All), ("Prefix", AffixFilter.Prefix), ("Suffix", AffixFilter.Suffix));
+            return;
+        }
+
+        var tags = rows.Select(r => r.Tag).Where(t => t.Length > 0).Distinct().ToList();
+        if (tags.Count < 2) return;
+
+        tags.Insert(0, AnyTag);
+
+        ImGui.SetNextItemWidth(220f);
+        if (!ImGui.BeginCombo("##picktag", _pickTag)) return;
+
+        foreach (var tag in tags)
+            if (ImGui.Selectable(tag, tag == _pickTag)) _pickTag = tag;
+
+        ImGui.EndCombo();
+    }
+
+    // two lines per row: what it does, then the muted line naming what actually gets inserted. both
+    // wrap, because a harvest craft is a full sentence and truncating it makes the list unreadable.
+    void DrawPickerRow(ScriptSnippets.Row row, bool mods)
+    {
+        var picked = mods && _picked.Contains(row.Insert);
+        var wrap = Math.Max(120f, ImGui.GetContentRegionAvail().X - 8f);
+
+        var height = ImGui.CalcTextSize(row.Primary, false, wrap).Y;
+        if (row.Secondary.Length > 0) height += ImGui.CalcTextSize(row.Secondary, false, wrap).Y;
+
+        var start = ImGui.GetCursorPos();
+
+        if (ImGui.Selectable("##sel", picked, ImGuiSelectableFlags.SpanAllColumns, new Vector2(0f, height)))
+            Pick(row, mods);
+
+        // the selectable owns the row's hit box, so the text goes back over the top of it
+        ImGui.SetCursorPos(start);
+        ImGui.PushTextWrapPos(start.X + wrap);
+        ImGui.TextWrapped(Controls.EscPct(row.Primary));
+
+        if (row.Secondary.Length > 0)
+            using (new EColor.StyleColorScope((ImGuiCol.Text, ImGui.GetColorU32(ImGuiCol.TextDisabled))))
+                ImGui.TextWrapped(Controls.EscPct(row.Secondary));
+
+        ImGui.PopTextWrapPos();
+    }
+
+    void Pick(ScriptSnippets.Row row, bool mods)
+    {
+        // mods gather up, since a script usually wants "did it roll any of these". everything else
+        // is the whole answer on its own, so it goes straight in.
+        if (mods)
+        {
+            if (!_picked.Remove(row.Insert)) _picked.Add(row.Insert);
+            return;
+        }
+
+        // a snippet is code and lands as-is; a currency or craft name is a string literal
+        Editor.Insert(EditorId, ref _text,
+            _picker == Picker.Snippets ? row.Insert : Literal(row.Insert));
+
+        _picker = Picker.None;
+    }
+
+    void DrawPickerFooter()
+    {
+        ImGui.BeginDisabled(_picked.Count == 0);
+        if (ImGui.Button($"Insert ({_picked.Count})"))
+        {
+            Editor.Insert(EditorId, ref _text, ModsLiteral());
+            _picker = Picker.None;
+        }
+        ImGui.EndDisabled();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Clear")) _picked.Clear();
+
+        ImGui.SameLine();
+        if (ImGui.Button("Close")) _picker = Picker.None;
+
+        if (_picked.Count > 0)
+        {
+            ImGui.SameLine();
+            ImGui.TextDisabled(string.Join(", ", _picked));
+        }
+    }
+
+    // one pick is a plain string, several become the array the mod calls all take
+    string ModsLiteral() =>
+        _picked.Count == 1
+            ? Literal(_picked[0])
+            : "new[] { " + string.Join(", ", _picked.Select(Literal)) + " }";
+
+    static string Literal(string value) =>
+        "\"" + (value ?? "").Replace("\\", "\\\\").Replace("\"", "\\\"") + "\"";
+
+    // space-separated words, all of which have to match, in any order - a word that parses as a
+    // regex is used as one, which is how you get at "fire.*resist" without an exact phrase
+    List<ScriptSnippets.Row> Filter(IReadOnlyList<ScriptSnippets.Row> rows, bool mods)
+    {
+        var terms = (_pickFilter ?? "")
+            .Split((char[])null, StringSplitOptions.RemoveEmptyEntries)
+            .Select(TermMatcher)
+            .ToList();
+
+        return rows
+            .Where(r => (!mods || _pickAffix == AffixFilter.All || r.Tag == _pickAffix.ToString())
+                        && (mods || _pickTag == AnyTag || r.Tag == _pickTag)
+                        && terms.All(m => m(r.Search)))
+            .ToList();
+    }
+
+    static Func<string, bool> TermMatcher(string term)
+    {
+        try
+        {
+            var rx = new Regex(term, RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+            return s => rx.IsMatch(s);
+        }
+        catch (ArgumentException)
+        {
+            // half-typed pattern - fall back to a plain contains so the list doesn't blank out
+            return s => s.Contains(term, StringComparison.OrdinalIgnoreCase);
+        }
     }
 
     void DrawSaveAsPopup(ExileCrafting plugin)

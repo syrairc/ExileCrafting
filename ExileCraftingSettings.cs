@@ -27,6 +27,7 @@ public class ExileCraftingSettings : ISettings
     public ToggleNode Enable { get; set; } = new ToggleNode(false);
     public HotkeyNodeV2 OpenPickerHotkey { get; set; } = new(Keys.NumPad7);
     public HotkeyNodeV2 AbortHotkey { get; set; } = new(Keys.Escape);
+    public HotkeyNodeV2 PauseHotkey { get; set; } = new(Keys.Space);
     public ToggleNode RestrictedMode { get; set; } = new ToggleNode(false);
     public HotkeyNodeV2 ToggleSlotHotkey { get; set; } = new(Keys.Add);
 

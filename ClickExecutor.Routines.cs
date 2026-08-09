@@ -187,6 +187,118 @@ public sealed partial class ClickExecutor
         log.Add($"{currencyName} x{applied}.");
     }
 
+    // alch and scour without a second pickup. shift holds the orb on the cursor, alt swaps which
+    // orb it is. letting shift go is what ends the whole use, so it goes down once and up once.
+    IEnumerator ApplyPairUntilRoutine(string primary, string alternate, Func<bool> useAlternate,
+        Func<bool> done, Action<string> charge, Action<string> applied)
+    {
+        _result = false;
+        _alternate = alternate;
+        _altHeld = false;
+
+        var log = ExileCrafting.Main.CraftLog;
+
+        if (done())
+        {
+            _result = true;
+            yield break;
+        }
+
+        foreach (var step in PrepareAndPickUp(primary)) yield return step;
+        if (!_prepared) yield break;
+
+        var applications = 0;
+
+        try
+        {
+            Input.KeyDown(Keys.ShiftKey);
+
+            while (true)
+            {
+                var want = useAlternate() ? alternate : primary;
+
+                foreach (var step in SetCursorTo(want)) yield return step;
+                if (!_pollResult)
+                {
+                    log.Add($"stopped after {applications}: the alt swap didn't put {want} on the " +
+                            $"cursor - {primary} and {alternate} may not be a pair, or you're out of {want}.");
+                    break;
+                }
+
+                charge(want);
+
+                var before = CraftingSlot.ReadItem().Address;
+
+                if (applications > 0) Jiggle();
+
+                foreach (var step in ClickButton(MouseButtons.Left)) yield return step;
+
+                foreach (var step in Poll(() => SlotSettledOn(before), ApplyResultTimeoutMs)) yield return step;
+                if (!_pollResult)
+                {
+                    log.Add($"stopped after {applications}: the {want} click didn't change the item.");
+                    break;
+                }
+
+                applications++;
+                applied(want);
+
+                if (done())
+                {
+                    _result = true;
+                    break;
+                }
+
+                if (!CursorHoldingAnything())
+                {
+                    log.Add($"stopped after {applications}: ran out of currency.");
+                    break;
+                }
+
+                var s = ExileCrafting.Main.Settings;
+                yield return new WaitTime(s.RollDelay(s.ActionDelayMin, s.ActionDelayMax));
+            }
+        }
+        finally
+        {
+            // alt first: letting shift go is what drops the orb, and that must never happen mid-swap
+            if (_altHeld)
+            {
+                Input.KeyUp(AltKey);
+                _altHeld = false;
+            }
+
+            Input.KeyUp(Keys.ShiftKey);
+        }
+
+        log.Add($"{primary} and {alternate} x{applications}.");
+    }
+
+    // every modifier change is confirmed on the cursor before anything gets clicked
+    IEnumerable SetCursorTo(string want)
+    {
+        if (IsCursorHolding(want))
+        {
+            _pollResult = true;
+            yield break;
+        }
+
+        if (want == _alternate)
+        {
+            Input.KeyDown(AltKey);
+            _altHeld = true;
+        }
+        else
+        {
+            Input.KeyUp(AltKey);
+            _altHeld = false;
+        }
+
+        yield return new WaitTime(OffClickDwellMs);
+
+        foreach (var step in Poll(() => IsCursorHolding(want), AltSwapTimeoutMs)) yield return step;
+    }
+
     IEnumerator ApplyHarvestRoutine(string craftName)
     {
         _result = false;
