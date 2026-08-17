@@ -54,6 +54,8 @@ await ctx.ApplyCurrencyUntil("Orb of Alteration", () => ctx.CountMods("Increased
 await ctx.ApplyPairUntil(primary, alternate, useAlternate, done);
 await ctx.AlchScourUntil(() => ctx.CountMods(refuse) == 0);
 await ctx.AlchScour();
+await ctx.AltAugUntil(() => ctx.CountMods(first) > 0, () => ctx.CountMods(second) > 0);
+await ctx.ChaosExaltUntil(() => ctx.CountMods(first) > 0, () => ctx.CountMods(second) > 0);
 await ctx.ApplyHarvest("Reforge a Rare item with random modifiers, including a Lightning modifier");
 await ctx.Ask("Keep this one?");                       // never inside an *Until condition
 await ctx.CheckMods(ModPool.Implicit, wanted);         // CountMods plus a reading pause

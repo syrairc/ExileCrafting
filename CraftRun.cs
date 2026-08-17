@@ -253,6 +253,26 @@ public sealed class CraftContext
         return await ApplyCurrency("Orb of Alchemy");
     }
 
+    // explicits only - the pool every reroll actually touches
+    public int ModCount => Item.Mods?.ExplicitMods?.Count ?? 0;
+
+    // alt spam until addWhen() likes the roll, one alt-swapped orb for the extra mod, then back to
+    // spamming if done() still isn't happy. the mod cap is what stops it adding to a full item.
+    public Task<bool> RollThenAddUntil(string primary, string alternate, int maxMods,
+        Func<bool> addWhen, Func<bool> done)
+    {
+        if (addWhen == null) throw new ArgumentNullException(nameof(addWhen));
+        return ApplyPairUntil(primary, alternate, () => ModCount < maxMods && addWhen(), done);
+    }
+
+    // magic items cap at two explicits, so the aug only ever lands on a single-mod roll
+    public Task<bool> AltAugUntil(Func<bool> augWhen, Func<bool> done) =>
+        RollThenAddUntil("Orb of Alteration", "Orb of Augmentation", 2, augWhen, done);
+
+    // same shape on a rare. maxMods is 6 for gear, drop it to 4 for jewels
+    public Task<bool> ChaosExaltUntil(Func<bool> exaltWhen, Func<bool> done, int maxMods = 6) =>
+        RollThenAddUntil("Chaos Orb", "Exalted Orb", maxMods, exaltWhen, done);
+
     // select the craft in the horticrafting station and press Craft once. the search text has to
     // match exactly one craft in the list - an ambiguous one aborts and logs what it matched.
     public async Task<bool> ApplyHarvest(string craftName)

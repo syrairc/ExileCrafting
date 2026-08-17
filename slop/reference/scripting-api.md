@@ -127,6 +127,28 @@ await ctx.AlchScourUntil(() => ctx.CountMods(refuse) == 0);
 
 One reroll with two pickups: scours if the item is not white, then alchs once. Leaves it rare.
 
+### `await ctx.RollThenAddUntil(string primary, string alternate, int maxMods, Func<bool> addWhen, Func<bool> done)`
+
+Spam the primary until `addWhen()` likes the roll, alt-swap to the alternate for one more mod, then
+go back to spamming when `done()` still isn't satisfied. `maxMods` counts explicits and is what
+keeps the alternate off a full item. `ctx.ModCount` is the same count if a condition needs it.
+
+### `await ctx.AltAugUntil(Func<bool> augWhen, Func<bool> done)`
+
+`RollThenAddUntil("Orb of Alteration", "Orb of Augmentation", 2, augWhen, done)`. Needs a magic item
+and both orbs in the tab.
+
+```csharp
+await ctx.AltAugUntil(
+    () => ctx.CountMods("IncreasedLife") > 0,
+    () => ctx.CountMods("IncreasedLife") > 0 && ctx.CountMods("IncreasedMana") > 0);
+```
+
+### `await ctx.ChaosExaltUntil(Func<bool> exaltWhen, Func<bool> done, int maxMods = 6)`
+
+Same on a rare, with Chaos Orb and Exalted Orb. Pass `maxMods: 4` for jewels, otherwise the exalt
+gets tried on a full item and the run stops on a click that changed nothing.
+
 ### `await ctx.ApplyHarvest(string craftText)`
 
 Harvest scripts only. Focuses the horticrafting station, ctrl+F filters the craft list by

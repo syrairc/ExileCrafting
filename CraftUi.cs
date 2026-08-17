@@ -562,10 +562,9 @@ public static class CraftOverlay
         if (anchor == null) return;
 
         var (rect, harvest) = anchor.Value;
-        // GetClientRectCache is relative to the game window, the draw list wants screen coords
-        var offset = plugin.GameController.Window.GetWindowRectangle().TopLeft;
-        var offsetVec = new Vector2(offset.X, offset.Y);
-        var min = new Vector2(rect.X + offset.X, rect.Y + offset.Y);
+        // both the element rects and the draw list start at the game window's top left, so no
+        // window offset here - adding one only looked right because fullscreen puts it at 0,0
+        var min = new Vector2(rect.X, rect.Y);
         var max = new Vector2(min.X + rect.Width, min.Y + rect.Height);
 
         // PressedOnce consumes the press, so both pickers share one read
@@ -574,12 +573,12 @@ public static class CraftOverlay
 
         // the station's bottom right corner sits way off to the side of the craft slot, so in harvest
         // the button hangs under the Craft button instead
-        var underCraft = CraftButtonAnchor(harvest, offsetVec);
+        var underCraft = CraftButtonAnchor(harvest);
         DrawOpenButton(plugin, underCraft ?? new Vector2(max.X, max.Y + 4f),
             underCraft.HasValue ? new Vector2(0.5f, 0f) : new Vector2(1f, 0f));
         DrawStatus(plugin, min, max);
-        DrawSlotPicker(plugin, offsetVec, toggling);
-        DrawQueuePicker(plugin, offsetVec, toggling);
+        DrawSlotPicker(plugin, toggling);
+        DrawQueuePicker(plugin, toggling);
     }
 
     // the harvest window comes back with the rect so the button and the status line can't disagree
@@ -595,7 +594,7 @@ public static class CraftOverlay
         return null;
     }
 
-    static void DrawSlotPicker(ExileCrafting plugin, Vector2 windowOffset, bool toggling)
+    static void DrawSlotPicker(ExileCrafting plugin, bool toggling)
     {
         if (!plugin.IsCraftDialogOpen || !plugin.Settings.RestrictedMode.Value) return;
 
@@ -611,7 +610,7 @@ public static class CraftOverlay
             if (item?.Item == null) continue;
 
             var r = item.GetClientRectCache;
-            var min = new Vector2(r.X + windowOffset.X, r.Y + windowOffset.Y);
+            var min = new Vector2(r.X, r.Y);
             var max = new Vector2(min.X + r.Width, min.Y + r.Height);
 
             var hovered = mouse.X >= min.X && mouse.X <= max.X && mouse.Y >= min.Y && mouse.Y <= max.Y;
@@ -622,7 +621,7 @@ public static class CraftOverlay
         }
     }
 
-    static void DrawQueuePicker(ExileCrafting plugin, Vector2 windowOffset, bool toggling)
+    static void DrawQueuePicker(ExileCrafting plugin, bool toggling)
     {
         if (!plugin.IsCraftDialogOpen) return;
 
@@ -639,7 +638,7 @@ public static class CraftOverlay
             if (key < 0) continue;
 
             var r = item.GetClientRectCache;
-            var min = new Vector2(r.X + windowOffset.X, r.Y + windowOffset.Y);
+            var min = new Vector2(r.X, r.Y);
             var max = new Vector2(min.X + r.Width, min.Y + r.Height);
 
             var hovered = mouse.X >= min.X && mouse.X <= max.X && mouse.Y >= min.Y && mouse.Y <= max.Y;
@@ -652,13 +651,13 @@ public static class CraftOverlay
         }
     }
 
-    static Vector2? CraftButtonAnchor(HarvestWindow harvest, Vector2 windowOffset)
+    static Vector2? CraftButtonAnchor(HarvestWindow harvest)
     {
         var rect = harvest?.CraftButton?.GetClientRectCache;
         if (rect == null) return null;
 
         var r = rect.Value;
-        return new Vector2(r.X + r.Width * 0.5f + windowOffset.X, r.Y + r.Height + 40f + windowOffset.Y);
+        return new Vector2(r.X + r.Width * 0.5f, r.Y + r.Height + 40f);
     }
 
     static void DrawOpenButton(ExileCrafting plugin, Vector2 pos, Vector2 pivot)
