@@ -6,7 +6,7 @@ using ExileCore.PoEMemory.Models;
 using ExileCore.Shared.Enums;
 using ExileCore;
 using ExileImGui;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -627,7 +627,7 @@ public static class CraftPrompt
         _tcs = new TaskCompletionSource<bool>();
         _message = message ?? "";
         // ### keeps the popup id fixed while the visible title follows the script
-        _title = Text.Ascii(ExileCrafting.Main.RunningScriptName ?? "Craft Script") + "###craftprompt";
+        _title = ExileCrafting.Main.RunningScriptName ?? "Craft Script" + "###craftprompt";
         _buttons = buttons;
         _token = token;
         _opened = false;
@@ -671,7 +671,7 @@ public static class CraftPrompt
 
         ImGui.PushTextWrapPos(ImGui.GetCursorPosX() + 480f);
         // TextWrapped is printf-style and a craft question is full of % signs
-        ImGui.TextUnformatted(Text.Ascii(_message));
+        ImGui.TextUnformatted(_message);
         ImGui.PopTextWrapPos();
 
         ImGui.Separator();

@@ -1,6 +1,6 @@
 using ExileCore.PoEMemory.Elements;
 using ExileImGui;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using System.Collections.Generic;
 using System.Linq;
 using System.Numerics;
@@ -149,7 +149,7 @@ public sealed class CraftDialog
         }
 
         var state = plugin.RunningStatusText;
-        ImGui.TextUnformatted(Text.Ascii($"{plugin.RunningScriptName} - {state}"));
+        ImGui.TextUnformatted($"{plugin.RunningScriptName} - {state}");
     }
 
     void DrawList(ExileCrafting plugin)
@@ -205,7 +205,7 @@ public sealed class CraftDialog
                 ImGui.TextUnformatted(InventoryGrid.Describe(job.Cell));
 
                 ImGui.TableNextColumn();
-                ImGui.TextUnformatted(Text.Ascii(TitleOf(plugin, job)));
+                ImGui.TextUnformatted(TitleOf(plugin, job));
 
                 ImGui.TableNextColumn();
                 ImGui.TextUnformatted(job.MaxApplications > 0 ? job.MaxApplications.ToString() : "-");
@@ -617,7 +617,7 @@ public static class CraftOverlay
             if (toggling && hovered) CraftingSlot.ToggleAllowed(slotKeys, item);
 
             var allowed = CraftingSlot.IsAllowed(slotKeys, item);
-            draw.AddRect(min, max, allowed ? AllowedColor : BlockedColor, 0f, ImDrawFlags.None, hovered ? 3f : 2f);
+            draw.AddRect(min, max, allowed ? AllowedColor : BlockedColor, 0f, hovered ? 3f : 2f, ImDrawFlags.None);
         }
     }
 
@@ -645,9 +645,9 @@ public static class CraftOverlay
             if (toggling && hovered) plugin.QueuePopover.OpenFor(plugin, key, mouse);
 
             if (InventoryGrid.IsQueued(key))
-                draw.AddRect(min, max, AllowedColor, 0f, ImDrawFlags.None, hovered ? 3f : 2f);
+                draw.AddRect(min, max, AllowedColor, 0f, hovered ? 3f : 2f, ImDrawFlags.None);
             else if (hovered)
-                draw.AddRect(min, max, BlockedColor, 0f, ImDrawFlags.None, 2f);
+                draw.AddRect(min, max, BlockedColor, 0f, 2f, ImDrawFlags.None);
         }
     }
 

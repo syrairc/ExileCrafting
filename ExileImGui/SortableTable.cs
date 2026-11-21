@@ -1,7 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 
 namespace ExileImGui;
 
@@ -52,7 +52,9 @@ public static class SortableTable
     /// <param name="columns">Left-to-right column definitions.</param>
     /// <param name="filter">Search box text, retained by the caller like any other ImGui field.</param>
     /// <param name="maxHeight">Scrolls past this height. 0 grows to fit and lets the parent window
-    /// scroll instead.</param>
+    /// scroll instead. A scrolling table also clips: only the rows actually on screen are drawn, so a
+    /// few thousand rows cost the same as a few dozen. That needs every row the same height - a cell
+    /// that wraps or stacks will misplace the ones after it, so keep cell content to one line.</param>
     public static void Draw<T>(string id, IList<T> items, TableColumn<T>[] columns,
         ref string filter, Func<T, string> filterText = null, float maxHeight = 0f)
     {
@@ -68,10 +70,24 @@ public static class SortableTable
             filter = f;
         }
 
+        // the search box above ate into what is left, so a caller that passed "the rest of the window"
+        // now overflows it by exactly one box and the parent grows a scrollbar. clamp here rather than
+        // making every caller subtract a box height it did not ask for.
+        if (maxHeight > 0f)
+        {
+            float avail = ImGui.GetContentRegionAvail().Y;
+            if (avail > 0f && avail < maxHeight) maxHeight = avail;
+        }
+
         var visible = VisibleIndices(items, filterText, filter ?? "");
 
+        // NoSavedSettings or imgui persists column widths per table id in its ini and REPLAYS them over
+        // the widths the caller declared - so editing a Width in code silently does nothing, and adding or
+        // removing a column reapplies the old widths at the new indices. dragging a border still works, it
+        // just does not outlive the session. widths here are authored in code, so code wins.
         var flags = ImGuiTableFlags.RowBg | ImGuiTableFlags.BordersOuter | ImGuiTableFlags.BordersInnerV
-                    | ImGuiTableFlags.Resizable | ImGuiTableFlags.Sortable | ImGuiTableFlags.SortTristate;
+                    | ImGuiTableFlags.Resizable | ImGuiTableFlags.Sortable | ImGuiTableFlags.SortTristate
+                    | ImGuiTableFlags.NoSavedSettings;
         if (maxHeight > 0f) flags |= ImGuiTableFlags.ScrollY;
 
         if (!ImGui.BeginTable("t", columns.Length, flags, new Vector2(0f, maxHeight)))
@@ -96,25 +112,44 @@ public static class SortableTable
                 s.SortDirection == ImGuiSortDirection.Ascending);
         }
 
-        foreach (int i in visible)
+        // only a scrolling table can clip - without ScrollY there is no viewport to clip against, and
+        // the clipper would hide everything past the first screenful
+        if (maxHeight > 0f)
         {
-            // per-row PushID or two rows of identical widgets share state. source index, not view
-            // position, so a row keeps its id across a sort.
-            ImGui.PushID(i);
-            ImGui.TableNextRow();
-            for (int c = 0; c < columns.Length; c++)
-            {
-                ImGui.TableNextColumn();
-                // and per-column too, since Draw is a free callback - two columns sharing one cell
-                // helper would otherwise draw the same widget id twice in a row and share its state
-                ImGui.PushID(c);
-                columns[c].Draw?.Invoke(items[i], i);
-                ImGui.PopID();
-            }
-            ImGui.PopID();
+            ImGuiListClipperPtr clipper;
+            clipper = ImGui.ImGuiListClipper();
+            clipper.Begin(visible.Count);
+            while (clipper.Step())
+                for (int k = clipper.DisplayStart; k < clipper.DisplayEnd; k++)
+                    DrawRow(items, columns, visible[k]);
+            clipper.End();
+            clipper.Destroy();
+        }
+        else
+        {
+            foreach (int i in visible)
+                DrawRow(items, columns, i);
         }
 
         ImGui.EndTable();
+        ImGui.PopID();
+    }
+
+    private static void DrawRow<T>(IList<T> items, TableColumn<T>[] columns, int i)
+    {
+        // per-row PushID or two rows of identical widgets share state. source index, not view
+        // position, so a row keeps its id across a sort.
+        ImGui.PushID(i);
+        ImGui.TableNextRow();
+        for (int c = 0; c < columns.Length; c++)
+        {
+            ImGui.TableNextColumn();
+            // and per-column too, since Draw is a free callback - two columns sharing one cell
+            // helper would otherwise draw the same widget id twice in a row and share its state
+            ImGui.PushID(c);
+            columns[c].Draw?.Invoke(items[i], i);
+            ImGui.PopID();
+        }
         ImGui.PopID();
     }
 

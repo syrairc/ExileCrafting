@@ -12,7 +12,7 @@ using ExileCore.PoEMemory.Elements.InventoryElements;
 using ExileCore.Shared;
 using ExileCore.Shared.Enums;
 using Humanizer;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SharpDX;
 using Vector2 = System.Numerics.Vector2;
 
@@ -55,16 +55,24 @@ public sealed partial class ClickExecutor
         var currencyItem = CraftingSlot.FindCurrency(currencyName);
         if (currencyItem == null) yield break;
 
-        foreach (var step in MoveMouseTo(AimAt(currencyItem.GetClientRectCache))) yield return step;
-
-        foreach (var step in Poll(() => IsHovering(currencyItem.Item.Address), HoverConfirmTimeoutMs)) yield return step;
-        if (!_pollResult)
+        if (_mouseless)
         {
-            log.Add($"aborted: mouse never landed on the {currencyName} stack.");
-            yield break;
+            foreach (var step in BridgeClick(currencyItem, 1, 0)) yield return step;
+            if (!_pollResult) yield break;
         }
+        else
+        {
+            foreach (var step in MoveMouseTo(AimAt(currencyItem.GetClientRectCache))) yield return step;
 
-        foreach (var step in ClickButton(MouseButtons.Right)) yield return step;
+            foreach (var step in Poll(() => IsHovering(currencyItem.Item.Address), HoverConfirmTimeoutMs)) yield return step;
+            if (!_pollResult)
+            {
+                log.Add($"aborted: mouse never landed on the {currencyName} stack.");
+                yield break;
+            }
+
+            foreach (var step in ClickButton(MouseButtons.Right)) yield return step;
+        }
 
         foreach (var step in Poll(() => IsCursorHolding(currencyName), CursorConfirmTimeoutMs)) yield return step;
         if (!_pollResult)
@@ -86,6 +94,13 @@ public sealed partial class ClickExecutor
             yield break;
         }
 
+        if (_mouseless)
+        {
+            _slot = slot;
+            _prepared = true;
+            yield break;
+        }
+
         foreach (var step in MoveMouseTo(AimAt(slot.GetClientRectCache))) yield return step;
 
         foreach (var step in Poll(() => CraftingSlot.IsHoveringSlot(slot.Item.Address), HoverConfirmTimeoutMs)) yield return step;
@@ -103,11 +118,13 @@ public sealed partial class ClickExecutor
     {
         _result = false;
         LastRunApplied = 0;
+        ChooseInput();
 
         foreach (var step in PrepareAndPickUp(currencyName)) yield return step;
         if (!_prepared) yield break;
 
-        foreach (var step in ClickButton(MouseButtons.Left)) yield return step;
+        foreach (var step in LeftClickSlot()) yield return step;
+        if (!_pollResult) yield break;
 
         foreach (var step in Poll(() => SlotSettledOn(_startAddress), ApplyResultTimeoutMs)) yield return step;
         _result = _pollResult;
@@ -127,6 +144,14 @@ public sealed partial class ClickExecutor
         if (done())
         {
             _result = true;
+            yield break;
+        }
+
+        ChooseInput();
+        if (_mouseless)
+        {
+            foreach (var step in MouselessUntil(() => currencyName, done, _ => charge(), _ => { })) yield return step;
+            log.Add($"{currencyName} x{LastRunApplied}.");
             yield break;
         }
 
@@ -204,6 +229,14 @@ public sealed partial class ClickExecutor
             yield break;
         }
 
+        ChooseInput();
+        if (_mouseless)
+        {
+            foreach (var step in MouselessUntil(() => useAlternate() ? alternate : primary, done, charge, applied)) yield return step;
+            log.Add($"{primary} and {alternate} x{LastRunApplied}.");
+            yield break;
+        }
+
         foreach (var step in PrepareAndPickUp(primary)) yield return step;
         if (!_prepared) yield break;
 
@@ -272,6 +305,52 @@ public sealed partial class ClickExecutor
         }
 
         log.Add($"{primary} and {alternate} x{applications}.");
+    }
+
+    // no shift or alt held: every roll picks the wanted orb up again, which costs nothing without a mouse
+    IEnumerable MouselessUntil(Func<string> want, Func<bool> done, Action<string> charge, Action<string> applied)
+    {
+        LastRunApplied = 0;
+        var log = ExileCrafting.Main.CraftLog;
+
+        while (true)
+        {
+            var name = want();
+
+            charge(name);
+
+            foreach (var step in PrepareAndPickUp(name)) yield return step;
+            if (!_prepared) yield break;
+
+            foreach (var step in LeftClickSlot()) yield return step;
+            if (!_pollResult) yield break;
+
+            foreach (var step in Poll(() => SlotSettledOn(_startAddress), ApplyResultTimeoutMs)) yield return step;
+            if (!_pollResult)
+            {
+                log.Add($"stopped after {LastRunApplied}: the {name} click didn't change the item.");
+                yield break;
+            }
+
+            LastRunApplied++;
+            applied(name);
+
+            if (done())
+            {
+                _result = true;
+                yield break;
+            }
+
+            foreach (var step in Poll(() => !CursorHoldingAnything(), CursorConfirmTimeoutMs)) yield return step;
+            if (!_pollResult)
+            {
+                log.Add($"stopped after {LastRunApplied}: {name} stayed on the cursor after the click.");
+                yield break;
+            }
+
+            var s = ExileCrafting.Main.Settings;
+            yield return new WaitTime(s.RollDelay(s.ActionDelayMin, s.ActionDelayMax));
+        }
     }
 
     // every modifier change is confirmed on the cursor before anything gets clicked
@@ -522,6 +601,33 @@ public sealed partial class ClickExecutor
         var address = item.Item.Address;
         LastOriginRect = item.GetClientRectCache;
 
+        ChooseInput();
+        if (_mouseless)
+        {
+            foreach (var step in BridgeClick(item, 0, 1)) yield return step;
+            if (!_pollResult) yield break;
+        }
+        else
+        {
+            foreach (var step in MouseTake(address, cellKey)) yield return step;
+            if (!_pollResult) yield break;
+        }
+
+        foreach (var step in Poll(() => !CraftingSlot.ReadItem().IsEmpty && InventoryGrid.IsCellEmpty(cellKey),
+                     MoveResultTimeoutMs)) yield return step;
+        if (!_pollResult)
+        {
+            log.Add($"aborted: the item from {InventoryGrid.Describe(cellKey)} didn't move into the {CraftingSlot.SlotLabel}.");
+            yield break;
+        }
+
+        _result = true;
+    }
+
+    IEnumerable MouseTake(long address, int cellKey)
+    {
+        var log = ExileCrafting.Main.CraftLog;
+
         foreach (var step in MoveMouseTo(AimAt(LastOriginRect))) yield return step;
 
         foreach (var step in Poll(() => IsHovering(address), HoverConfirmTimeoutMs)) yield return step;
@@ -542,15 +648,7 @@ public sealed partial class ClickExecutor
             Input.KeyUp(Keys.ControlKey);
         }
 
-        foreach (var step in Poll(() => !CraftingSlot.ReadItem().IsEmpty && InventoryGrid.IsCellEmpty(cellKey),
-                     MoveResultTimeoutMs)) yield return step;
-        if (!_pollResult)
-        {
-            log.Add($"aborted: the item from {InventoryGrid.Describe(cellKey)} didn't move into the {CraftingSlot.SlotLabel}.");
-            yield break;
-        }
-
-        _result = true;
+        _pollResult = true;
     }
 
     IEnumerator ReturnRoutine(int cellKey, RectangleF originRect)
@@ -573,6 +671,32 @@ public sealed partial class ClickExecutor
         }
 
         var address = slot.Item.Address;
+
+        ChooseInput();
+        if (_mouseless)
+        {
+            if (!InventoryGrid.IsCellEmpty(cellKey))
+            {
+                log.Add($"aborted: {InventoryGrid.Describe(cellKey)} isn't free any more.");
+                yield break;
+            }
+
+            foreach (var step in BridgeClick(slot, 0, 1)) yield return step;
+            if (!_pollResult) yield break;
+
+            foreach (var step in Poll(() => CraftingSlot.ReadItem().IsEmpty && !InventoryGrid.IsCellEmpty(cellKey),
+                         MoveResultTimeoutMs)) yield return step;
+            if (_pollResult)
+            {
+                _result = true;
+                yield break;
+            }
+
+            log.Add(CraftingSlot.ReadItem().IsEmpty
+                ? $"stopped: the item went back to your inventory but not to {InventoryGrid.Describe(cellKey)}."
+                : $"aborted: the item didn't leave the {CraftingSlot.SlotLabel}.");
+            yield break;
+        }
 
         foreach (var step in MoveMouseTo(AimAt(slot.GetClientRectCache))) yield return step;
 

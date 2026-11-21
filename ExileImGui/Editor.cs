@@ -4,7 +4,7 @@ using System.Numerics;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SColor = SharpDX.Color;
 
 namespace ExileImGui;
@@ -100,7 +100,10 @@ public readonly struct CompletionContext
 /// </summary>
 public readonly struct Completion
 {
-    /// <summary>Text that replaces [WordStart, Caret) on commit.</summary>
+    /// <summary>
+    /// Text that replaces [WordStart, Caret) on commit, or [ReplaceStart, Caret) when this row set
+    /// its own <see cref="ReplaceStart"/>.
+    /// </summary>
     public readonly string Insert;
 
     /// <summary>What the row shows. Null falls back to <see cref="Insert"/>.</summary>
@@ -113,12 +116,32 @@ public readonly struct Completion
     public readonly TokenKind Kind;
 
     /// <summary>
+    /// Where this row's insert starts replacing, as an absolute char index. Negative means the
+    /// default, <see cref="CompletionContext.WordStart"/>.
+    /// <para>
+    /// Only worth setting when the span being completed is not an identifier run, since an
+    /// identifier run is all the default rule knows how to find. Completing inside a string literal
+    /// is the usual case: a buff id or a player name can hold spaces, so the whole quoted body is
+    /// the prefix the user typed, not just the last word of it. Left at the default, the commit
+    /// would keep the earlier words and insert the full name after them.
+    /// </para>
+    /// <para>
+    /// It also decides what the row is ranked against, so a candidate the user has typed most of
+    /// still reads as a prefix hit rather than sorting behind every unrelated one.
+    /// </para>
+    /// </summary>
+    public readonly int ReplaceStart;
+
+    /// <summary>
     /// Describes one candidate. Pass <paramref name="label"/> when the row should read differently
     /// from what gets inserted, for example "Substring()" inserting "Substring(".
     /// </summary>
-    public Completion(string insert, string detail = null, TokenKind kind = TokenKind.Identifier, string label = null)
+    /// <param name="replaceStart">Absolute char index the insert replaces from. Leave it negative
+    /// for the identifier run at the caret, which is what almost every completer wants.</param>
+    public Completion(string insert, string detail = null, TokenKind kind = TokenKind.Identifier, string label = null,
+        int replaceStart = -1)
     {
-        Insert = insert; Detail = detail; Kind = kind; Label = label ?? insert;
+        Insert = insert; Detail = detail; Kind = kind; Label = label ?? insert; ReplaceStart = replaceStart;
     }
 }
 
@@ -417,7 +440,7 @@ public static class Editor
         // because it has to survive an unfocused frame. held until we actually see it land - see the
         // block at the top of Draw.
         public string PendingSetText;
-        public int PendingSetCaret = -1;   // where the caret should land once it does, -1 leaves imgui's answer alone
+        public int PendingSetCaret = -1;
 
         // sets all three together so a caller can't set two and leave the third stale from
         // a previous edit.
@@ -569,7 +592,7 @@ public static class Editor
         if (d.EventFlag == ImGuiInputTextFlags.CallbackResize)
         {
             GrowNativeBuf(s, d.BufTextLen + 1);
-            d.Buf = s.NativeBuf;
+            d.Buf = (byte*)s.NativeBuf;
             d.BufSize = s.NativeBufCap;
             return 0;
         }
@@ -662,7 +685,8 @@ public static class Editor
     static unsafe void CommitCompletion(State s, ImGuiInputTextCallbackDataPtr d)
     {
         if (!s.PopupOpen || s.Sel < 0 || s.Sel >= s.Items.Count) return;
-        string insert = s.Items[s.Sel].Insert;
+        var item = s.Items[s.Sel];
+        string insert = item.Insert;
         s.PopupOpen = false;
         // consumed by UpdatePopup below, same frame - the word right after a commit is the text
         // we just inserted, which is its own prefix match, so without this the popup reopens
@@ -670,13 +694,19 @@ public static class Editor
         s.SuppressPopupReopen = true;
         if (string.IsNullOrEmpty(insert)) return;   // a provider handed us nothing to insert, just close the popup
 
-        // s.WordStart is a char index - WordAt works over the managed string - but DeleteChars
+        // the span start is a char index - WordAt works over the managed string - but DeleteChars
         // and InsertChars count utf-8 bytes, same reason the soft-tab path in Draw converts
         // explicitly before calling either. skipping the conversion here would land the delete
         // short on any non-ascii before the word, and could split a multi-byte sequence in two.
         string live = Encoding.UTF8.GetString((byte*)d.Buf, d.BufTextLen);
-        int wordStartChars = Math.Clamp(s.WordStart, 0, live.Length);
-        int from = Encoding.UTF8.GetByteCount(live.Substring(0, wordStartChars));
+        // the row's own ReplaceStart when it set one, which is how a string-literal completion
+        // replaces the whole quoted body instead of just its last word. bounded by the LIVE buffer
+        // rather than the text the completer saw, since an edit can have landed since.
+        int startChars = Math.Clamp(ReplaceStartOf(item, s.WordStart, live.Length), 0, live.Length);
+        // d.CursorPos is this frame's caret; s.Caret is last frame's, so the ceiling goes on the
+        // byte offset here rather than on the char index above. a row asking to replace from past
+        // the caret collapses to a plain insert AT the caret instead of one somewhere ahead of it.
+        int from = Math.Min(Encoding.UTF8.GetByteCount(live.Substring(0, startChars)), d.CursorPos);
         int len = Math.Clamp(d.CursorPos - from, 0, d.BufTextLen - from);
         if (len > 0) d.DeleteChars(from, len);
         d.InsertChars(from, insert);
@@ -731,10 +761,6 @@ public static class Editor
     /// <param name="id">Safe for an id that has never been drawn - the state is created here and the
     /// id's first draw applies the edit. Safe to call twice before a draw too; the second call just
     /// replaces the first.</param>
-    /// <param name="caret">Where to leave the caret once the text lands, as an index into
-    /// <paramref name="text"/>. The default -1 keeps imgui's own answer, which for a whole-buffer
-    /// replace is the end of the document - right for loading a file, wrong for anything that only
-    /// rewrites part of one.</param>
     public static void SetText(string id, string text, int caret = -1)
     {
         if (id == null) return;
@@ -743,24 +769,12 @@ public static class Editor
         s.PendingSetCaret = caret;
     }
 
-    /// <summary>
-    /// Splices a snippet in at the caret, replacing the selection if there is one, and leaves the
-    /// caret just past what was inserted.
-    /// </summary>
-    /// <remarks>
-    /// Goes through <see cref="SetText"/> rather than the edit channel on purpose: a toolbar button
-    /// or a picker popup takes focus off the editor as it is clicked, and the edit channel only
-    /// survives while the widget is active.
-    /// </remarks>
-    /// <param name="text">The caller's buffer, rewritten in place.</param>
-    /// <param name="snippet">Null or empty does nothing.</param>
     public static void Insert(string id, ref string text, string snippet)
     {
         if (id == null || string.IsNullOrEmpty(snippet)) return;
 
         var current = text ?? "";
 
-        // an id that has never been drawn has no caret to speak of, so append
         if (!_states.TryGetValue(id, out var s))
         {
             text = current + snippet;
@@ -960,15 +974,24 @@ public static class Editor
             // unchanged. re-querying every keystroke is the point though, so the key stays this
             // narrow on purpose.
 
+            // a row that replaces a wider span is ranked against that whole span, so it has to match
+            // what the commit will actually delete. ranked on the trailing word alone, a string
+            // candidate the user has typed most of scores a contains hit rather than a prefix one
+            // and sorts behind every unrelated prefix match in the list. one substring per such row
+            // per KEYSTROKE (this block only runs when the word changed), not per frame, and rows
+            // that leave ReplaceStart alone allocate nothing.
+            string RowWord(in Completion c) =>
+                c.ReplaceStart < 0 ? word : WordText(text, ReplaceStartOf(c, ws, caret), caret);
+
             // two passes rather than a sort. List.Sort is unstable, so equal-ranked candidates
             // would shuffle between keystrokes and the highlight would jump around. capped so a
             // provider handing back thousands of matches cannot make either pass, or the popup
             // that walks s.Items afterward, unbounded work.
             s.Items.Clear();
             for (int i = 0; i < s.Raw.Count && s.Items.Count < MaxCompletionItems; i++)
-                if (Rank(word, s.Raw[i].Insert) == 0) s.Items.Add(s.Raw[i]);
+                if (Rank(RowWord(s.Raw[i]), s.Raw[i].Insert) == 0) s.Items.Add(s.Raw[i]);
             for (int i = 0; i < s.Raw.Count && s.Items.Count < MaxCompletionItems; i++)
-                if (Rank(word, s.Raw[i].Insert) > 0) s.Items.Add(s.Raw[i]);
+                if (Rank(RowWord(s.Raw[i]), s.Raw[i].Insert) > 0) s.Items.Add(s.Raw[i]);
             // a fresh list starts at the top, and the scroll goes with it - keeping the old row
             // window over a list that is now a different length shows the wrong rows for a frame.
             s.Sel = 0;
@@ -1012,8 +1035,6 @@ public static class Editor
                 s.PendingSetText = null;
                 s.PendingSetCaret = -1;
                 externalSet = true;
-                // nothing is running the callback, so park the caret ourselves - imgui reads it
-                // back off this state the next time the widget goes active.
                 if (wantCaret >= 0) s.Caret = s.SelStart = s.SelEnd = Math.Clamp(wantCaret, 0, text.Length);
             }
         }
@@ -1108,7 +1129,7 @@ public static class Editor
             && ImGui.IsMouseHoveringRect(s.PopupMin, s.PopupMax, false))
             ImGui.SetNextWindowScroll(new Vector2(-1f, s.ChildScrollY));
 
-        ImGui.BeginChild("##ed", size, ImGuiChildFlags.Border, ImGuiWindowFlags.HorizontalScrollbar);
+        ImGui.BeginChild("##ed", size, ImGuiChildFlags.Borders, ImGuiWindowFlags.HorizontalScrollbar);
         try
         {
 
@@ -1211,13 +1232,8 @@ public static class Editor
             // the offsets in a queued edit (see PendingEditStale).
             if (s.PendingEditAt >= 0) s.PendingEditBaseLen = textLenBytes;
 
-            var flags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackCompletion
-                | ImGuiInputTextFlags.CallbackResize;
-            // off on the frame a block indent fires (imgui's own tab would fight the edit we just
-            // queued) and off while the popup is open (Tab needs to reach CallbackCompletion
-            // instead of imgui inserting a raw tab). AllowTabInput and CallbackCompletion both
-            // bind Tab, so only one of them gets to own the keypress at a time.
-            if (!blockIndent && !s.PopupOpen) flags |= ImGuiInputTextFlags.AllowTabInput;
+            var flags = ImGuiInputTextFlags.CallbackAlways | ImGuiInputTextFlags.CallbackResize;
+            flags |= !blockIndent && !s.PopupOpen ? ImGuiInputTextFlags.AllowTabInput : ImGuiInputTextFlags.CallbackCompletion;
 
             // the ref-string overload never sets CallbackResize and re-encodes its whole managed
             // buffer every frame no matter the size, so it cannot back a buffer that is both
@@ -1227,8 +1243,8 @@ public static class Editor
             {
                 fixed (byte* label = TextLabelUtf8)
                 {
-                    changed = ImGuiNative.igInputTextMultiline(label, (byte*)s.NativeBuf, (uint)s.NativeBufCap,
-                        new Vector2(innerW, innerH), flags, _cb, null) != 0;
+                    changed = ImGui.InputTextMultiline(label, (byte*)s.NativeBuf, (nuint)s.NativeBufCap,
+                        new Vector2(innerW, innerH), flags, _cb);
                 }
             }
         }
@@ -1396,9 +1412,9 @@ public static class Editor
             // completer built through a path that skips the constructor (default(Completion), an
             // object initializer) can still leave Label null with Insert set, so this guards the
             // same way at the draw site instead of trusting every construction path.
-            float w = ImGui.CalcTextSize(Text.Ascii(it.Label ?? it.Insert ?? "")).X;
+            float w = ImGui.CalcTextSize(it.Label ?? it.Insert ?? "").X;
             if (!string.IsNullOrEmpty(it.Detail))
-                w += gap + ImGui.CalcTextSize(Text.Ascii(it.Detail)).X;
+                w += gap + ImGui.CalcTextSize(it.Detail).X;
             rowWidth = Math.Max(rowWidth, w);
         }
         float boxW = Math.Clamp(rowWidth + pad * 2f, 160f, 420f);
@@ -1438,12 +1454,12 @@ public static class Editor
             if (i == s.Sel) dl.AddRectFilled(rowMin, rowMax, highlight);
 
             float textY = rowY + (rowH - ImGui.GetTextLineHeight()) * 0.5f;
-            string label = Text.Ascii(it.Label ?? it.Insert ?? "");
+            string label = it.Label ?? it.Insert ?? "";
             uint col = palette.TryGetValue(it.Kind, out var c) ? EColor.U32(c) : EColor.U32(o.Foreground);
             dl.AddText(new Vector2(min.X + pad, textY), col, label);
 
             if (string.IsNullOrEmpty(it.Detail)) continue;
-            string detail = Text.Ascii(it.Detail);
+            string detail = it.Detail;
             float labelW = ImGui.CalcTextSize(label).X;
             float detailX = Math.Max(min.X + pad + labelW + gap, max.X - pad - ImGui.CalcTextSize(detail).X);
             dl.AddText(new Vector2(detailX, textY), dim, detail);
@@ -1595,7 +1611,7 @@ public static class Editor
     /// <summary>
     /// Ranks a candidate against the word being typed. Lower sorts first.
     /// <para>
-    /// Rides on <see cref="Combo.Matches"/> rather than its own IndexOf, so the popup uses the same
+    /// Rides on <see cref="Text.Matches"/> rather than its own IndexOf, so the popup uses the same
     /// contains rule as every other picker in the library.
     /// </para>
     /// </summary>
@@ -1606,7 +1622,24 @@ public static class Editor
         if (string.IsNullOrEmpty(word)) return 0;
         if (candidate == null) return -1;
         if (candidate.StartsWith(word, StringComparison.OrdinalIgnoreCase)) return 0;
-        return Combo.Matches(word, candidate) ? 1 : -1;
+        return Text.Matches(word, candidate) ? 1 : -1;
+    }
+
+    /// <summary>
+    /// Where a row actually replaces from: its own <see cref="Completion.ReplaceStart"/> when it set
+    /// one, otherwise the identifier run at the caret. Clamped into [0, caret] so a provider handing
+    /// back a stale or nonsense index can only ever produce a no-op delete, never an out-of-range
+    /// one.
+    /// <para>
+    /// One rule, two callers: the commit deletes this span, and the ranking pass reads the text over
+    /// it as the word to match against. They have to agree, or a row gets ranked on one prefix and
+    /// then replaces a different one.
+    /// </para>
+    /// </summary>
+    public static int ReplaceStartOf(in Completion c, int wordStart, int caret)
+    {
+        if (caret < 0) caret = 0;
+        return c.ReplaceStart < 0 ? wordStart : Math.Min(c.ReplaceStart, caret);
     }
 
     /// <summary>
@@ -1885,13 +1918,12 @@ public static class Editor
         if (ReferenceEquals(s.ColXLine, line)) return s.ColX;
         if (s.ColX.Length < line.Length + 1) s.ColX = new float[line.Length + 1];
 
-        var font = ImGui.GetFont();
-        float scale = font.FontSize > 0f ? ImGui.GetFontSize() / font.FontSize : 1f;
+        var font = ImGui.GetFontBaked();
         float w = 0f;
         s.ColX[0] = 0f;
         for (int i = 0; i < line.Length; i++)
         {
-            w += font.GetCharAdvance(line[i]) * scale;
+            w += font.GetCharAdvance(line[i]);
             s.ColX[i + 1] = w;
         }
         s.ColXLine = line;
@@ -2028,7 +2060,7 @@ public static class Editor
             var a0 = textOrigin + new Vector2(0f, lineH - 1f);
             dl.AddLine(a0, a0 + new Vector2(w0, 0f), col);
             if (ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows) && ImGui.IsMouseHoveringRect(textOrigin, textOrigin + new Vector2(w0, lineH)))
-                ImGui.SetTooltip(Text.Ascii(msg));
+                ImGui.SetTooltip(msg);
         }
 
         if (o.Errors == null || o.Errors.Count == 0) return;
@@ -2064,7 +2096,7 @@ public static class Editor
                 // ChildWindows here because the multiline input is its own nested child window -
                 // without it this is false exactly when the mouse sits over the text.
                 if (ImGui.IsWindowHovered(ImGuiHoveredFlags.ChildWindows) && ImGui.IsMouseHoveringRect(hot, hot + new Vector2(w, lineH)))
-                    ImGui.SetTooltip(Text.Ascii(kv.Value));
+                    ImGui.SetTooltip(kv.Value);
             }
         }
         catch { /* caller's error map changed mid-draw - skip this frame, not fatal */ }

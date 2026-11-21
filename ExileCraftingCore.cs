@@ -156,12 +156,14 @@ public class ExileCrafting : BaseSettingsPlugin<ExileCraftingSettings>
         ExileImGui.Windows.TabBar("exilecraftingsettings",
             ("General", () => { base.DrawSettings(); return false; }),
             ("Sounds", () => SoundSettingsTab.Draw(Settings)),
+            ("Crafting Tooltip", () => CraftOddsSettingsTab.Draw(Settings)),
             ("Automation", () => HumanizerSettingsTab.Draw(Settings)));
     }
 
     public override void Render()
     {
         CraftOverlay.Draw(this);
+        CurrencyOdds.Draw(this);
         _dialog.Draw(this);
         EditorDialog.Draw(this);
         QueuePopover.Draw(this);

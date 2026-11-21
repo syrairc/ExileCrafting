@@ -1,6 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 
 namespace ExileImGui;
 
@@ -48,6 +49,61 @@ public static class Windows
         return changed;
     }
 
+    // which side tab is selected, per id. imgui owns a TabBar's pick for you; a list of Selectables has
+    // nowhere to keep it, so it lives here - same as the width cache in Layout.BeginTrailing.
+    static readonly Dictionary<string, int> _sideTab = new();
+
+    /// <summary>
+    /// Which row a side nav should land on: the one asked for when it is a real tab, otherwise the
+    /// first real one. A remembered index can end up pointing at a section header after the tab list is
+    /// reordered, and a header has no body to draw. Pure, so the fallback is testable.
+    /// </summary>
+    /// <param name="want">Remembered index. Out of range or pointing at a header falls back.</param>
+    /// <returns>Index to draw, or -1 when the list is all headers and no tabs.</returns>
+    public static int PickTab((string label, Func<bool> body)[] tabs, int want)
+    {
+        if (tabs == null || tabs.Length == 0) return -1;
+        if (want >= 0 && want < tabs.Length && tabs[want].body != null) return want;
+        for (int i = 0; i < tabs.Length; i++)
+            if (tabs[i].body != null) return i;
+        return -1;
+    }
+
+    /// <summary>
+    /// The same (label, body) pairs <see cref="TabBar"/> takes, down the left side instead of across
+    /// the top. Past about eight tabs a top bar starts wrapping or scrolling and you can no longer see
+    /// where you are; a vertical list just gets taller.
+    /// <para>
+    /// An entry with a null body is a section header rather than a tab, so a long list can be grouped
+    /// without a second array to keep in step.
+    /// </para>
+    /// </summary>
+    /// <param name="leftWidth">Pixel width of the nav column. The body takes the rest.</param>
+    /// <returns>The selected body's changed flag, same contract as <see cref="TabBar"/>.</returns>
+    public static bool SideTabs(string id, float leftWidth, params (string label, Func<bool> body)[] tabs)
+    {
+        int cur = PickTab(tabs, _sideTab.TryGetValue(id, out var v) ? v : -1);
+        if (cur < 0) return false;
+
+        ImGui.PushID(id);
+        // its own scroll, so a tall nav doesn't drag the body's height around with it
+        ImGui.BeginChild("##nav", new Vector2(leftWidth, 0), ImGuiChildFlags.Borders);
+        for (int i = 0; i < tabs.Length; i++)
+        {
+            if (tabs[i].body == null) { ImGui.SeparatorText(tabs[i].label ?? ""); continue; }
+            if (ImGui.Selectable(tabs[i].label + "##t" + i, i == cur)) cur = i;
+        }
+        ImGui.EndChild();
+        _sideTab[id] = cur;
+
+        ImGui.SameLine();
+        ImGui.BeginChild("##body", Vector2.Zero, ImGuiChildFlags.Borders);
+        bool changed = tabs[cur].body();
+        ImGui.EndChild();
+        ImGui.PopID();
+        return changed;
+    }
+
     /// <summary>
     /// Fixed-width list on the left, detail pane on the right. You draw both sides.
     /// </summary>
@@ -55,11 +111,11 @@ public static class Windows
     public static void MasterDetail(string id, float leftWidth, Action left, Action right)
     {
         ImGui.PushID(id);
-        ImGui.BeginChild("##l", new Vector2(leftWidth, 0), ImGuiChildFlags.Border);
+        ImGui.BeginChild("##l", new Vector2(leftWidth, 0), ImGuiChildFlags.Borders);
         left();
         ImGui.EndChild();
         ImGui.SameLine();
-        ImGui.BeginChild("##r", new Vector2(0, 0), ImGuiChildFlags.Border);
+        ImGui.BeginChild("##r", new Vector2(0, 0), ImGuiChildFlags.Borders);
         right();
         ImGui.EndChild();
         ImGui.PopID();
@@ -109,10 +165,10 @@ public static class Windows
     public static void FilterPane(string id, string title, int count, ref string filter, string hint, Action body)
     {
         ImGui.PushID(id);
-        ImGui.TextDisabled(Text.Ascii(title));
-        Controls.BeginTrailing(id + "_count");   // keyed on the pane: the width cache is app-wide
+        ImGui.TextDisabled(title);
+        Layout.BeginTrailing(id + "_count");   // keyed on the pane: the width cache is app-wide
         ImGui.TextDisabled(count.ToString());
-        Controls.EndTrailing();
+        Layout.EndTrailing();
 
         ImGui.SetNextItemWidth(-1);
         ImGui.InputTextWithHint("##filter", "Filter", ref filter, 64);
@@ -128,7 +184,7 @@ public static class Windows
         {
             // wrap at the right edge of this pane. without it the hint just runs off the side.
             ImGui.PushTextWrapPos(0f);
-            ImGui.TextDisabled(Text.Ascii(hint));
+            ImGui.TextDisabled(hint);
             ImGui.PopTextWrapPos();
         }
         ImGui.PopID();

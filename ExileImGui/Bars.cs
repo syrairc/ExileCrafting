@@ -1,6 +1,6 @@
 using System;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 
 namespace ExileImGui;
 
@@ -55,10 +55,9 @@ public static class Bars
 
         if (string.IsNullOrEmpty(overlay)) return;
 
-        var text = Text.Ascii(overlay);
-        var size = ImGui.CalcTextSize(text);
+        var size = ImGui.CalcTextSize(overlay);
         draw.AddText(new Vector2(min.X + (width - size.X) * 0.5f, min.Y + (height - size.Y) * 0.5f),
-            ImGui.GetColorU32(ImGuiCol.Text), text);
+            ImGui.GetColorU32(ImGuiCol.Text), overlay);
     }
 
     /// <summary>

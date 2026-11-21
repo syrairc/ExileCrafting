@@ -1,41 +1,24 @@
+using System;
 using System.Collections.Generic;
-using System.Text;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 
 namespace ExileImGui;
 
 /// <summary>
-/// Shared text helpers for the foreground-drawlist widgets (overlays, toasts, richtext).
+/// Shared string helpers. Mostly for the foreground-drawlist widgets (overlays, toasts, richtext),
+/// plus the one filter rule every searchable control in here agrees on.
 /// </summary>
 public static class Text
 {
     /// <summary>
-    /// Maps common Unicode to ASCII (dropping the rest) so text renders in ImGui's ASCII-only
-    /// default font. Anything with no mapping becomes '?'.
+    /// The case-insensitive contains rule every picker in this library filters with.
     /// </summary>
-    /// <param name="s">Text to fold. Null and empty pass through untouched.</param>
-    /// <returns>The folded text, or <paramref name="s"/> itself when there was nothing to fold.</returns>
-    public static string Ascii(string s)
+    /// <returns>True when <paramref name="text"/> contains <paramref name="filter"/>. An empty or
+    /// whitespace filter matches everything; a null text matches nothing but never throws.</returns>
+    public static bool Matches(string filter, string text)
     {
-        if (string.IsNullOrEmpty(s)) return s;
-        var sb = new StringBuilder(s.Length);
-        foreach (var c in s)
-        {
-            if (c < 128) { sb.Append(c); continue; }
-            switch (c)
-            {
-                case '–': case '—': case '−': sb.Append('-'); break;   // en/em dash, minus
-                case '→': sb.Append("->"); break;
-                case '←': sb.Append("<-"); break;
-                case '•': case '·': case '●': case '◇': case '▶': sb.Append('*'); break;
-                case '✓': case '✔': case '×': sb.Append('x'); break;
-                case '“': case '”': sb.Append('"'); break;
-                case '‘': case '’': sb.Append('\''); break;
-                case '…': sb.Append("..."); break;
-                default: sb.Append('?'); break;
-            }
-        }
-        return sb.ToString();
+        if (string.IsNullOrWhiteSpace(filter)) return true;
+        return (text ?? "").Contains(filter, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>

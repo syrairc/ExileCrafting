@@ -1,7 +1,7 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using ExileCore;
 using ExileCore.Shared.Enums;
 using ExileCore.Shared.Helpers;
@@ -32,7 +32,7 @@ public static class Controls
     public static void Tip(string tip)
     {
         if (!string.IsNullOrEmpty(tip) && ImGui.IsItemHovered())
-            ImGui.SetTooltip(Text.Ascii(tip));
+            ImGui.SetTooltip(tip);
     }
 
     // the "##id" every widget needs. id defaults to the label, so a normal row is just (label, value) -
@@ -92,32 +92,14 @@ public static class Controls
         return false;
     }
 
-    // Enum.GetNames/GetValues both allocate a fresh array per call, and EnumCombo runs every frame.
-    // a generic static is per closed type and initialized once, so this costs neither the allocation
-    // nor a dictionary lookup to avoid it. enum members can't change at runtime, so caching is safe.
-    static class EnumCache<T> where T : struct, Enum
-    {
-        public static readonly string[] Names = Enum.GetNames(typeof(T));
-        public static readonly T[] Values = (T[])Enum.GetValues(typeof(T));
-        public static readonly string Id = typeof(T).Name;
-    }
-
     /// <summary>
-    /// Dropdown over an enum's names.
+    /// Dropdown over an enum's names. Same call as <see cref="Combo.Enum{T}"/>, which is where it
+    /// lives now - <c>Controls.cs</c> on its own does not need <c>Combo.cs</c>.
     /// </summary>
     /// <param name="id">There is no label to key off, so this falls back to the enum type name. Two
     /// combos over the same enum in one scope need one of their own.</param>
-    public static bool EnumCombo<T>(ref T value, string id = null, float width = 120f) where T : struct, Enum
-    {
-        id ??= EnumCache<T>.Id;
-        var names = EnumCache<T>.Names;
-        var vals = EnumCache<T>.Values;
-        int cur = Array.IndexOf(vals, value);
-        if (cur < 0) cur = 0;
-        ImGui.SetNextItemWidth(width);
-        if (ImGui.Combo("##" + id, ref cur, names, names.Length)) { value = vals[cur]; return true; }
-        return false;
-    }
+    public static bool EnumCombo<T>(ref T value, string id = null, float width = 120f) where T : struct, Enum =>
+        Combo.Enum(ref value, id, width);
 
     /// <summary>
     /// Collapsing section header, open by default. The usual top-level split on a settings page.
@@ -130,8 +112,9 @@ public static class Controls
     /// N buttons in a row instead of a dropdown, for 2-4 short options where a dropdown is a click
     /// too many. The active one is tinted with the theme accent, so it tracks the user's theme.
     /// </summary>
-    /// <param name="opts">One (label, value) pair per button.</param>
-    public static bool Segmented<T>(string id, ref T value, params (string label, T val)[] opts) where T : struct, Enum
+    /// <param name="opts">One (label, value) pair per button. Usually an enum, but any type that
+    /// compares by default equality works - Picker's category filter passes strings.</param>
+    public static bool Segmented<T>(string id, ref T value, params (string label, T val)[] opts)
     {
         bool changed = false;
         ImGui.PushID(id);
@@ -227,7 +210,7 @@ public static class Controls
             var b = buttons[i];
             if (i > 0) ImGui.SameLine(0, 1);
 
-            string label = Text.Ascii(b.Text ?? "");
+            string label = b.Text ?? "";
             var sh = b.Sheet != null && sheets != null && sheets.Length > 0
                 ? sheets[SheetIndex(sheets, b.Sheet)] : null;
             bool hasIcon = sh != null && sh.TexId != IntPtr.Zero;
@@ -268,7 +251,7 @@ public static class Controls
             {
                 var (uv0, uv1) = CellUv(sh, b.Cell);
                 float iy = min.Y + (size.Y - iconSize) * 0.5f;
-                dl.AddImage(sh.TexId, new Vector2(iconX, iy), new Vector2(iconX + iconSize, iy + iconSize),
+                dl.AddImage(Tex(sh.TexId), new Vector2(iconX, iy), new Vector2(iconX + iconSize, iy + iconSize),
                     uv0, uv1, fg);
             }
             dl.AddText(new Vector2(textX, min.Y + (size.Y - ts.Y) * 0.5f), fg, label);
@@ -290,6 +273,337 @@ public static class Controls
         return true;
     }
 
+    // ---- menu / split / compound buttons ----
+
+    // imgui's own combo arrow isn't public, so draw one. c is the centre of the glyph box, r its half width.
+    static void Chevron(ImDrawListPtr dl, Vector2 c, float r, uint col) =>
+        dl.AddTriangleFilled(new Vector2(c.X - r, c.Y - r * 0.5f), new Vector2(c.X + r, c.Y - r * 0.5f),
+            new Vector2(c.X, c.Y + r * 0.75f), col);
+
+    // shared dropdown body. anchored under the button instead of at the mouse, so it reads as a menu
+    // hanging off the thing you clicked rather than a context menu.
+    static int MenuPopup(string popId, string[] items, Vector2 anchor)
+    {
+        int hit = -1;
+        if (ImGui.IsPopupOpen(popId)) ImGui.SetNextWindowPos(anchor);
+        if (ImGui.BeginPopup(popId))
+        {
+            for (int i = 0; i < items.Length; i++)
+            {
+                if (items[i] == null) { ImGui.Separator(); continue; }
+                if (ImGui.Selectable(items[i] + "##i" + i)) hit = i;
+            }
+            ImGui.EndPopup();
+        }
+        return hit;
+    }
+
+    /// <summary>
+    /// A button that drops a menu instead of doing anything itself - the whole button opens it. For a
+    /// short list of related one-shot actions that doesn't deserve a row of its own.
+    /// </summary>
+    /// <param name="items">Menu entries in order. A null entry draws a separator and keeps its index,
+    /// so the indices you get back still line up with the array.</param>
+    /// <param name="width">0 sizes to the label plus the chevron.</param>
+    /// <returns>The index picked this frame, or -1.</returns>
+    public static int MenuButton(string label, string[] items, string id = null, float width = 0f)
+    {
+        if (items == null || items.Length == 0) return -1;
+        var style = ImGui.GetStyle();
+        string txt = label ?? "";
+        float h = ImGui.GetFrameHeight();
+        float arrow = h * 0.4f;
+        var ts = ImGui.CalcTextSize(txt);
+        float w = width > 0 ? width : ts.X + arrow + style.ItemInnerSpacing.X + style.FramePadding.X * 2;
+
+        ImGui.PushID(id ?? label);
+        if (ImGui.Button("##m", new Vector2(w, h))) ImGui.OpenPopup("##menu");
+        var min = ImGui.GetItemRectMin();
+        var max = ImGui.GetItemRectMax();
+        // label drawn by hand, same reason as ButtonGroup: imgui centres a button's own label and would
+        // put it under the chevron.
+        var dl = ImGui.GetWindowDrawList();
+        uint fg = ImGui.GetColorU32(ImGuiCol.Text);
+        dl.AddText(new Vector2(min.X + style.FramePadding.X, min.Y + (h - ts.Y) * 0.5f), fg, txt);
+        Chevron(dl, new Vector2(max.X - style.FramePadding.X - arrow * 0.5f, min.Y + h * 0.5f), arrow * 0.5f, fg);
+        int hit = MenuPopup("##menu", items, new Vector2(min.X, max.Y));
+        ImGui.PopID();
+        return hit;
+    }
+
+    /// <summary>
+    /// How a split button's total width divides: the chevron half gets its own, the primary takes the
+    /// rest. Pure, so the math is testable.
+    /// </summary>
+    /// <param name="gap">Space between the halves. 0 - the two are drawn flush.</param>
+    /// <returns>Primary width, never under 1 - a zero-width button is one you can't click.</returns>
+    public static float SplitPrimaryWidth(float total, float arrow, float gap = 0f) =>
+        Math.Max(total - arrow - gap, 1f);
+
+    /// <summary>
+    /// The one action you take most, with a chevron half glued to its right holding the variants.
+    /// Clicking the primary does the thing; clicking the chevron drops the menu.
+    /// </summary>
+    /// <param name="menu">Entries for the chevron half, same rules as <see cref="MenuButton"/>. Null or
+    /// empty leaves the chevron there but dead - use a plain button instead.</param>
+    /// <param name="picked">Menu index clicked this frame, or -1.</param>
+    /// <param name="width">Total width, chevron included. 0 sizes the primary to its label.</param>
+    /// <returns>True the frame the PRIMARY half is clicked. The menu reports through
+    /// <paramref name="picked"/>, so the two never collide.</returns>
+    public static bool SplitButton(string label, string[] menu, out int picked, string id = null, float width = 0f)
+    {
+        picked = -1;
+        var style = ImGui.GetStyle();
+        string txt = label ?? "";
+        float h = ImGui.GetFrameHeight();
+        float aw = h * 0.8f;
+        float pw = width > 0 ? SplitPrimaryWidth(width, aw)
+                             : ImGui.CalcTextSize(txt).X + style.FramePadding.X * 2;
+        bool has = menu != null && menu.Length > 0;
+
+        ImGui.PushID(id ?? label);
+        bool hit = ImGui.Button(txt + "##p", new Vector2(pw, h));
+        float left = ImGui.GetItemRectMin().X;
+        // the two halves overlap by the frame rounding rather than sitting flush: butted up, each half's
+        // rounded corners curve away from the other and leave a notch top and bottom. overlapping puts the
+        // chevron's left corners on top of the primary's fill instead, so the seam is solid.
+        // SameLine(0, -r) does NOT pull left - a negative spacing with no offset means "use the default
+        // ItemSpacing", so it widens the gap instead. SetCursorPosX is plain window-local, same trap Grid
+        // and Layout.BeginTrailing document.
+        float r = style.FrameRounding;
+        ImGui.SameLine(0, 0);
+        ImGui.SetCursorPosX(ImGui.GetCursorPosX() - r);
+        if (ImGui.Button("##d", new Vector2(aw + r, h)) && has) ImGui.OpenPopup("##menu");
+        var min = ImGui.GetItemRectMin();
+        var max = ImGui.GetItemRectMax();
+        var dl = ImGui.GetWindowDrawList();
+        // hairline so the halves still read as two things to click. without it the pair is one slab and
+        // nothing says the chevron does something else.
+        dl.AddLine(new Vector2(min.X + r, min.Y + r), new Vector2(min.X + r, max.Y - r),
+            ImGui.GetColorU32(ImGuiCol.Text, 0.25f));
+        Chevron(dl, new Vector2((min.X + r + max.X) * 0.5f, min.Y + h * 0.5f),
+            h * 0.2f, ImGui.GetColorU32(ImGuiCol.Text));
+        if (has) picked = MenuPopup("##menu", menu, new Vector2(left, max.Y));
+        ImGui.PopID();
+        return hit;
+    }
+
+    // the second line rides at this fraction of the font size. small enough to read as support text,
+    // big enough to still read.
+    const float SubScale = 0.85f;
+
+    /// <summary>
+    /// Compound button height: the taller of the stacked text block and the icon, plus padding. Pure,
+    /// so the layout math is testable. Pass 0 for <paramref name="subH"/> and the gap drops out too.
+    /// </summary>
+    public static float CompoundHeight(float topH, float subH, float gap, float iconSize, float padY) =>
+        Math.Max(topH + (subH > 0f ? gap + subH : 0f), iconSize) + padY * 2;
+
+    /// <summary>
+    /// Two-line button: the action on top, a line of explanation under it in smaller dim text. For the
+    /// two or three buttons on a page where the label alone leaves people guessing what they do.
+    /// </summary>
+    /// <param name="b">Text, optional colour and optional (sheet, cell) icon - the same struct
+    /// <see cref="ButtonGroup"/> takes. The icon sits left of both lines, so Side is ignored here.</param>
+    /// <param name="secondary">The second line. Empty gives a plain button at normal height.</param>
+    /// <param name="width">0 sizes to the wider of the two lines.</param>
+    public static unsafe bool CompoundButton(GroupButton b, string secondary, IconSheet[] sheets = null,
+        float iconSize = 24f, float width = 0f, string id = null)
+    {
+        var style = ImGui.GetStyle();
+        string top = b.Text ?? "";
+        string sub = secondary ?? "";
+        var sh = b.Sheet != null && sheets != null && sheets.Length > 0
+            ? sheets[SheetIndex(sheets, b.Sheet)] : null;
+        bool hasIcon = sh != null && sh.TexId != IntPtr.Zero;
+
+        float subPx = ImGui.GetFontSize() * SubScale;
+        var t0 = ImGui.CalcTextSize(top);
+        float subW = sub.Length > 0 ? ImGui.CalcTextSize(sub).X * SubScale : 0f;
+        float subH = sub.Length > 0 ? subPx : 0f;
+        float gap = style.ItemInnerSpacing.Y;
+        float iconW = hasIcon ? iconSize + style.ItemInnerSpacing.X * 2 : 0f;
+        float w = width > 0 ? width : Math.Max(t0.X, subW) + iconW + style.FramePadding.X * 2;
+        float th = CompoundHeight(t0.Y, subH, gap, 0f, 0f);                                  // text block alone
+        float hgt = CompoundHeight(t0.Y, subH, gap, hasIcon ? iconSize : 0f, style.FramePadding.Y);
+
+        bool clicked;
+        var col = b.Color;
+        ImGui.PushID(id ?? b.Text);
+        using (new EColor.StyleColorScope(
+                   (ImGuiCol.Button, col.HasValue ? EColor.U32(col.Value) : ImGui.GetColorU32(ImGuiCol.Button)),
+                   (ImGuiCol.ButtonHovered, col.HasValue ? EColor.U32(EColor.Scale(col.Value, 1.2f)) : ImGui.GetColorU32(ImGuiCol.ButtonHovered)),
+                   (ImGuiCol.ButtonActive, col.HasValue ? EColor.U32(EColor.Scale(col.Value, 0.8f)) : ImGui.GetColorU32(ImGuiCol.ButtonActive))))
+            clicked = ImGui.Button("##c", new Vector2(w, hgt));
+
+        // both lines and the icon are hand placed - imgui centres one line of label and has room for
+        // nothing else.
+        var min = ImGui.GetItemRectMin();
+        var dl = ImGui.GetWindowDrawList();
+        uint fg = col.HasValue ? EColor.U32(EColor.Contrast(col.Value)) : ImGui.GetColorU32(ImGuiCol.Text);
+        uint dim = col.HasValue ? EColor.U32(EColor.Fade(EColor.Contrast(col.Value), 0.7f))
+                                : ImGui.GetColorU32(ImGuiCol.Text, 0.6f);
+        float x = min.X + style.FramePadding.X;
+        if (hasIcon)
+        {
+            var (uv0, uv1) = CellUv(sh, b.Cell);
+            float iy = min.Y + (hgt - iconSize) * 0.5f;
+            dl.AddImage(Tex(sh.TexId), new Vector2(x, iy), new Vector2(x + iconSize, iy + iconSize), uv0, uv1, fg);
+            x += iconSize + style.ItemInnerSpacing.X * 2;
+        }
+        float y = min.Y + (hgt - th) * 0.5f;
+        dl.AddText(new Vector2(x, y), fg, top);
+        if (sub.Length > 0) dl.AddText(ImGui.GetFont(), subPx, new Vector2(x, y + t0.Y + gap), dim, sub);
+        ImGui.PopID();
+        return clicked;
+    }
+
+    // the one red in here. a wrong value and an excluded filter are the same "no" to the eye, so they
+    // share a colour rather than drifting apart.
+    static readonly SColor Bad = new(220, 80, 80, 255);
+
+    // ---- info marks and fields ----
+
+    /// <summary>
+    /// The dim <c>(?)</c> that explains itself on hover, for putting after a control you drew yourself.
+    /// ImGui ships this as a snippet in its demo rather than a call, which is why everyone rewrites it.
+    /// </summary>
+    /// <param name="info">Tooltip body. Empty draws the mark but says nothing, so a missing string is
+    /// visible rather than silent.</param>
+    /// <param name="wrap">Wrap width for the tooltip. Long help unwrapped runs off the screen.</param>
+    public static void InfoMark(string info, float wrap = 320f)
+    {
+        ImGui.TextDisabled("(?)");
+        if (string.IsNullOrEmpty(info) || !ImGui.IsItemHovered()) return;
+        ImGui.BeginTooltip();
+        ImGui.PushTextWrapPos(wrap);
+        ImGui.TextUnformatted(info);
+        ImGui.PopTextWrapPos();
+        ImGui.EndTooltip();
+    }
+
+    /// <summary>
+    /// A label with the <c>(?)</c> glued to its right. The label carries the short name, the mark
+    /// carries the paragraph nobody wants sitting on the settings page.
+    /// </summary>
+    public static void InfoLabel(string label, string info, float wrap = 320f)
+    {
+        ImGui.TextUnformatted(label ?? "");
+        ImGui.SameLine(0, ImGui.GetStyle().ItemInnerSpacing.X);
+        InfoMark(info, wrap);
+    }
+
+    /// <summary>
+    /// Label on top, your control under it, a hint or an error message below. The shape for a value
+    /// that can be wrong - a path, a regex - where the complaint has to sit with what caused it.
+    /// <para>
+    /// The control is wrapped in a group, so an error rings whatever it drew, however many items that
+    /// was.
+    /// </para>
+    /// </summary>
+    /// <param name="control">Draws the control and returns its own changed flag.</param>
+    /// <param name="hint">Dim helper line under the control. Drawn only while there is no error.</param>
+    /// <param name="error">Non-empty replaces the hint, in red, and rings the control. Null or empty
+    /// is the good state.</param>
+    /// <returns>The control's changed flag, passed straight through.</returns>
+    public static bool Field(string id, string label, Func<bool> control, string hint = null, string error = null)
+    {
+        if (control == null) return false;
+        bool bad = !string.IsNullOrEmpty(error);
+        ImGui.PushID(id);
+        if (!string.IsNullOrEmpty(label))
+        {
+            if (bad) ImGui.PushStyleColor(ImGuiCol.Text, EColor.U32(Bad));
+            ImGui.TextUnformatted(label);
+            if (bad) ImGui.PopStyleColor();
+        }
+        // grouped so GetItemRect covers everything the callback drew, not just its last item
+        ImGui.BeginGroup();
+        bool changed = control();
+        ImGui.EndGroup();
+        if (bad)
+            ImGui.GetWindowDrawList().AddRect(ImGui.GetItemRectMin(), ImGui.GetItemRectMax(),
+                EColor.U32(Bad), ImGui.GetStyle().FrameRounding);
+        string msg = bad ? error : hint;
+        if (!string.IsNullOrEmpty(msg))
+        {
+            if (bad) ImGui.TextColored(EColor.ToVector4(Bad), msg);
+            else ImGui.TextDisabled(msg);
+        }
+        ImGui.PopID();
+        return changed;
+    }
+
+    // ---- overflow row ----
+
+    /// <summary>
+    /// How many items fit before the overflow button has to swallow the rest. Everything fitting means
+    /// no overflow button is needed, so that case gets the full width rather than reserving a slot for
+    /// a button that never draws. Pure, so the reflow math is testable.
+    /// </summary>
+    /// <param name="overflowW">Width the "..." button costs once anything has to go in it.</param>
+    /// <returns>0..widths.Length. Zero puts everything in the menu.</returns>
+    public static int FitItems(float[] widths, float avail, float spacing, float overflowW)
+    {
+        if (widths == null || widths.Length == 0) return 0;
+        float all = 0f;
+        for (int i = 0; i < widths.Length; i++) all += widths[i] + (i > 0 ? spacing : 0f);
+        if (all <= avail) return widths.Length;
+
+        float budget = avail - overflowW - spacing;
+        int n = 0;
+        float used = 0f;
+        for (int i = 0; i < widths.Length; i++)
+        {
+            float w = widths[i] + (i > 0 ? spacing : 0f);
+            if (used + w > budget) break;
+            used += w;
+            n++;
+        }
+        return n;
+    }
+
+    /// <summary>
+    /// A row of buttons that gives up gracefully when the panel narrows: as many as fit are drawn, the
+    /// rest fold into a trailing menu. Nothing disappears, it just stops being one click away.
+    /// </summary>
+    /// <param name="width">Space to fill. 0 measures what's available.</param>
+    /// <param name="more">Label for the overflow button.</param>
+    /// <returns>The index clicked this frame, or -1. Items in the menu keep their array index, so the
+    /// return means the same thing whether the row was wide or narrow.</returns>
+    public static int OverflowRow(string id, string[] items, float width = 0f, string more = "...")
+    {
+        if (items == null || items.Length == 0) return -1;
+        var style = ImGui.GetStyle();
+        float avail = width > 0 ? width : ImGui.GetContentRegionAvail().X;
+        float pad = style.FramePadding.X * 2;
+
+        var widths = new float[items.Length];
+        for (int i = 0; i < items.Length; i++) widths[i] = ImGui.CalcTextSize(items[i] ?? "").X + pad;
+        float moreW = ImGui.CalcTextSize(more).X + pad + ImGui.GetFrameHeight() * 0.4f
+                    + style.ItemInnerSpacing.X;
+        int n = FitItems(widths, avail, style.ItemSpacing.X, moreW);
+
+        int hit = -1;
+        ImGui.PushID(id);
+        for (int i = 0; i < n; i++)
+        {
+            if (i > 0) ImGui.SameLine();
+            if (ImGui.Button((items[i] ?? "") + "##o" + i)) hit = i;
+        }
+        if (n < items.Length)
+        {
+            if (n > 0) ImGui.SameLine();
+            // the menu holds the tail but reports in the caller's indices, so the offset is added back here
+            var rest = new string[items.Length - n];
+            Array.Copy(items, n, rest, 0, rest.Length);
+            int m = MenuButton(more, rest, "more");
+            if (m >= 0) hit = n + m;
+        }
+        ImGui.PopID();
+        return hit;
+    }
+
     /// <summary>
     /// <c>[checkbox][your control, greyed when off] label</c> - the shape for "use the default unless
     /// I say otherwise".
@@ -297,10 +611,15 @@ public static class Controls
     /// <param name="ovr">The override toggle. The inner control is disabled while this is false.</param>
     /// <param name="control">Draws the inner control and returns its own changed flag.</param>
     /// <returns>The toggle's change OR the inner control's, folded into one flag.</returns>
-    public static bool OverrideRow(string id, string label, ref bool ovr, Func<bool> control)
+    public static bool OverrideRow(string id, string label, ref bool ovr, Func<bool> control, string tip = null)
     {
         ImGui.PushID(id);
         bool changed = ImGui.Checkbox("##o", ref ovr);
+        // the bare checkbox is the whole point of the row and reads as nothing without this. callers
+        // using the row as a plain enable rather than an override pass their own wording
+        Tip(tip ?? (ovr
+            ? "Overriding " + label.ToLowerInvariant() + ". Untick to inherit."
+            : "Inheriting " + label.ToLowerInvariant() + ". Tick to override."));
         ImGui.SameLine();
         if (!ovr) ImGui.BeginDisabled();
         changed |= control();
@@ -356,7 +675,7 @@ public static class Controls
     public static float LabelStride(params string[] labels)
     {
         float w = 0f;
-        foreach (var l in labels) w = Math.Max(w, ImGui.CalcTextSize(Text.Ascii(l)).X);
+        foreach (var l in labels) w = Math.Max(w, ImGui.CalcTextSize(l).X);
         return w + ImGui.GetFrameHeight() + ImGui.GetStyle().ItemSpacing.X * 2;
     }
 
@@ -400,7 +719,7 @@ public static class Controls
         for (int i = 0; i < count; i++)
         {
             int col = i % columns;
-            // SameLine(0,0) + SetCursorPosX, NOT SameLine(offset) - same trap BeginTrailing documents.
+            // SameLine(0,0) + SetCursorPosX, NOT SameLine(offset) - same trap Layout.BeginTrailing documents.
             // SameLine's offset is measured from the column origin and imgui adds ColumnsOffset back
             // in, but x0 came from GetCursorPosX and already carries it, so the column offset lands
             // twice and every cell past the first drifts right by a whole column. SetCursorPosX is
@@ -437,7 +756,7 @@ public static class Controls
         return Grid(id, items.Length, ItemStride(items, it => it.Label), i =>
         {
             bool v = items[i].Get();
-            bool changed = ImGui.Checkbox(Text.Ascii(items[i].Label) + "##t", ref v);
+            bool changed = ImGui.Checkbox(items[i].Label + "##t", ref v);
             if (changed) items[i].Set(v);
             Tip(items[i].Tip);   // runs every pass, IsItemHovered only reads the checkbox just drawn
             return changed;
@@ -456,7 +775,7 @@ public static class Controls
         if (n == 0) return false;
         return Grid(id, n, LabelStride(labels), i =>
         {
-            bool changed = ImGui.Checkbox(Text.Ascii(labels[i]) + "##t", ref values[i]);
+            bool changed = ImGui.Checkbox(labels[i] + "##t", ref values[i]);
             if (tips != null && i < tips.Length) Tip(tips[i]);
             return changed;
         }, columns);
@@ -486,46 +805,16 @@ public static class Controls
         return Grid(id, n, LabelStride(labels), i => Color(labels[i], ref values[i], "c", alpha), columns);
     }
 
-    // ---- trailing group: imgui has no right-align ----
-    // measure the group once, place it the next frame. width is cached per id, so a group only jumps on the
-    // first frame it exists (or the frame its content changes width). not nestable - one open group at a time.
-    static readonly Dictionary<string, float> _trailW = new();
-    static string _trailId;
-
     /// <summary>
-    /// Right-aligns a group of widgets. ImGui has no right-align, so the group is measured on one
-    /// frame and placed on the next - it only jumps on the first frame it exists, or the frame its
-    /// content changes width. Not nestable: one open group at a time.
-    /// <para>
-    /// Call it after the row's left-hand item, draw the tail widgets, then <see cref="EndTrailing"/>.
-    /// Works inside a table cell too, aligning to the cell's right edge rather than the window's.
-    /// </para>
+    /// Right-aligns a group of widgets. Same call as <see cref="Layout.BeginTrailing"/>, which is
+    /// where it lives now - the frames that want only right-alignment don't need this file.
     /// </summary>
     /// <param name="pad">Pushes the group off the right edge, to leave room for a scrollbar or a
     /// child border.</param>
-    public static void BeginTrailing(string id, float pad = 0f)
-    {
-        float w = _trailW.TryGetValue(id, out var x) ? x : 0f;
-        // cursor + avail is the right edge of whatever we're in, so this also lands correctly inside a
-        // table cell (GetContentRegionMax would give the whole window and overshoot).
-        float left = ImGui.GetCursorPosX();
-        float right = left + ImGui.GetContentRegionAvail().X;
-        // don't use SameLine(offset) - it adds the table's column offset to whatever you pass, and our x
-        // already carries it, so anything past the first column lands off the right edge and gets clipped.
-        // SameLine(0,0) + SetCursorPosX are both plain window-local.
-        ImGui.SameLine(0, 0);
-        ImGui.SetCursorPosX(Math.Max(left, right - w - pad));
-        ImGui.BeginGroup();
-        _trailId = id;
-    }
+    public static void BeginTrailing(string id, float pad = 0f) => Layout.BeginTrailing(id, pad);
 
-    /// <summary>Closes a <see cref="BeginTrailing"/> and caches its measured width for next frame.</summary>
-    public static void EndTrailing()
-    {
-        ImGui.EndGroup();
-        if (_trailId != null) _trailW[_trailId] = ImGui.GetItemRectSize().X;   // remembered for next frame
-        _trailId = null;
-    }
+    /// <summary>Closes a <see cref="BeginTrailing"/>. Same call as <see cref="Layout.EndTrailing"/>.</summary>
+    public static void EndTrailing() => Layout.EndTrailing();
 
     /// <summary>
     /// Nudges the next item down so a short widget - a 12px swatch, a line of plain text - sits
@@ -555,7 +844,7 @@ public static class Controls
         using (new EColor.StyleColorScope(
                    (ImGuiCol.Button, ImGui.GetColorU32(v ? ImGuiCol.ButtonActive : ImGuiCol.FrameBg)),
                    (ImGuiCol.Text, ImGui.GetColorU32(v ? ImGuiCol.Text : ImGuiCol.TextDisabled))))
-            if (ImGui.Button(Text.Ascii(glyph) + "##" + id, new Vector2(width, 0)))
+            if (ImGui.Button(glyph + "##" + id, new Vector2(width, 0)))
             {
                 v = !v;
                 changed = true;
@@ -582,10 +871,12 @@ public static class Controls
     /// var tex = Graphics.GetTextureId("MyIcons.png");    // cache it, it's a dictionary lookup
     /// </code>
     /// </summary>
+    static ImTextureRef Tex(IntPtr id) => new() { TexID = new ImTextureID(id) };
+
     public static void IconImage(IntPtr texId, Vector2 uv0, Vector2 uv1, float size, SColor tint)
     {
         if (texId == IntPtr.Zero) { ImGui.Dummy(new Vector2(size, size)); return; }
-        ImGui.Image(texId, new Vector2(size, size), uv0, uv1, EColor.ToVector4(tint));
+        ImGui.ImageWithBg(Tex(texId), new Vector2(size, size), uv0, uv1, Vector4.Zero, EColor.ToVector4(tint));
     }
 
     /// <summary>Same, for the game's own Icons.png, where <see cref="MapIconsIndex"/> picks the cell.</summary>
@@ -635,8 +926,14 @@ public static class Controls
         /// <summary>Texture id, or 0 when the sheet never loaded. The picker says "sheet not loaded" for 0.</summary>
         public IntPtr TexId;
 
-        /// <summary>How many cells the sheet has.</summary>
+        /// <summary>How many cells the sheet has, counting from <see cref="First"/>.</summary>
         public int Count;
+
+        /// <summary>
+        /// First valid cell index. 0 for a sheet you index from zero; 1 for the game sheet, whose
+        /// cell math is one-based and whose index 0 sits off the top of the texture.
+        /// </summary>
+        public int First;
 
         /// <summary>Maps a cell index to its UV corners.</summary>
         public Func<int, (Vector2 uv0, Vector2 uv1)> Uv;
@@ -656,11 +953,17 @@ public static class Controls
         {
             gfx.InitImage("Icons.png");   // lives in ExileCore's own textures folder
             var names = Enum.GetNames(typeof(MapIconsIndex));
+            // the enum outruns the atlas - the sheet gains rows slower than the names do - and a uv
+            // past the bottom edge wraps to art from the top under a name that belongs to neither.
+            // walk back to the last index the texture actually covers. index 0 is None, no sprite.
+            int last = names.Length - 1;
+            while (last > 1 && SpriteHelper.GetUV((MapIconsIndex)last).Bottom > 1f) last--;
             return new IconSheet
             {
                 Name = name,
                 TexId = Resolve(gfx, "Icons.png"),
-                Count = names.Length,
+                First = 1,
+                Count = last,
                 Label = i => names[i],
                 Uv = i =>
                 {
@@ -713,7 +1016,7 @@ public static class Controls
         SColor tint, float size = 22f, float cell = 32f, int columns = 8)
     {
         int noSize = 0;
-        return IconPicker(id, sheets, ref sheet, ref index, ref tint, ref noSize, false, 0, 0, size, cell, columns);
+        return IconPicker(id, sheets, ref sheet, ref index, ref tint, ref noSize, false, 0, 0, false, size, cell, columns);
     }
 
     /// <summary>
@@ -728,16 +1031,34 @@ public static class Controls
     public static bool IconPicker(string id, IconSheet[] sheets, ref string sheet, ref int index,
         ref SColor tint, ref int drawSize, int minSize = 8, int maxSize = 96,
         float size = 22f, float cell = 32f, int columns = 8) =>
-        IconPicker(id, sheets, ref sheet, ref index, ref tint, ref drawSize, true, minSize, maxSize,
+        IconPicker(id, sheets, ref sheet, ref index, ref tint, ref drawSize, true, minSize, maxSize, true,
             size, cell, columns);
 
+    /// <summary>
+    /// The preview popup with a tint swatch but NO size slider, for a value that has no per-item size
+    /// of its own. Everything else matches the size-bearing overload.
+    /// </summary>
+    /// <param name="tint">Written back by the popup's own colour swatch.</param>
+    /// <returns>True the frame a cell or the tint changes.</returns>
+    public static bool IconPicker(string id, IconSheet[] sheets, ref string sheet, ref int index,
+        ref SColor tint, bool tintEnabled = true, float size = 22f, float cell = 32f, int columns = 8)
+    {
+        int px = 48;   // fixed preview size, since there is nothing per-item to vary it by
+        return IconPicker(id, sheets, ref sheet, ref index, ref tint, ref px, true, px, px, false,
+            size, cell, columns, tintEnabled);
+    }
+
     static bool IconPicker(string id, IconSheet[] sheets, ref string sheet, ref int index,
-        ref SColor tint, ref int drawSize, bool preview, int minSize, int maxSize,
-        float size, float cell, int columns)
+        ref SColor tint, ref int drawSize, bool preview, int minSize, int maxSize, bool showSize,
+        float size, float cell, int columns, bool tintEnabled = true)
     {
         if (sheets == null || sheets.Length == 0) return false;
         bool changed = false;
-        var tintV = EColor.ToVector4(tint);
+        // tintEnabled says whether the tint APPLIES, not whether it can be edited. a caller whose tint
+        // is switched off still wants to set the colour it will use once switched on, and previewing it
+        // tinted anyway would be a lie about what the sprite currently draws as.
+        var shown = tintEnabled ? tint : SColor.White;
+        var tintV = EColor.ToVector4(shown);
         int cur = SheetIndex(sheets, sheet);
 
         ImGui.PushID(id);
@@ -749,7 +1070,7 @@ public static class Controls
         using (new EColor.StyleColorScope((ImGuiCol.Button, 0u)))
             clicked = sheets[cur].TexId == IntPtr.Zero
                 ? ImGui.Button("?##pick", new Vector2(size, size))     // sheet never loaded - still openable
-                : ImGui.ImageButton("##pick", sheets[cur].TexId, new Vector2(size, size), u0, u1, Vector4.Zero, tintV);
+                : ImGui.ImageButton("##pick", Tex(sheets[cur].TexId), new Vector2(size, size), u0, u1, Vector4.Zero, tintV);
         if (clicked)
         {
             _pickerSheet[id] = cur;        // open on the sheet the value already lives in
@@ -764,7 +1085,7 @@ public static class Controls
             for (int i = 0; i < sheets.Length; i++)
             {
                 if (i > 0) ImGui.SameLine(0, 12);
-                if (ImGui.RadioButton(Text.Ascii(sheets[i].Name) + "##s" + i, active == i)) active = i;
+                if (ImGui.RadioButton(sheets[i].Name + "##s" + i, active == i)) active = i;
             }
             _pickerSheet[id] = active;
             var sh = sheets[active];
@@ -787,18 +1108,22 @@ public static class Controls
                     float px = Math.Clamp(drawSize, minSize, maxSize);
                     var (p0, p1) = CellUv(sheets[cur], index);   // the stored value, not the sheet being browsed
                     var at = org + new Vector2((box - px) * 0.5f, (box - px) * 0.5f);
-                    dl.AddImage(sheets[cur].TexId, at, at + new Vector2(px), p0, p1, EColor.U32(tint));
+                    dl.AddImage(Tex(sheets[cur].TexId), at, at + new Vector2(px), p0, p1, EColor.U32(shown));
                 }
                 ImGui.SameLine();
                 ImGui.BeginGroup();
-                ImGui.SetNextItemWidth(160f);
-                if (ImGui.SliderInt("Size", ref drawSize, minSize, maxSize)) changed = true;
+                if (showSize)
+                {
+                    ImGui.SetNextItemWidth(160f);
+                    if (ImGui.SliderInt("Size", ref drawSize, minSize, maxSize)) changed = true;
+                }
                 changed |= Color("Tint", ref tint, "ptint");
                 // picking a cell leaves this popup open (that's the point of the preview), so it needs a
                 // way out that isn't "click somewhere else". Esc still works too.
                 if (ImGui.Button("Done")) ImGui.CloseCurrentPopup();
                 ImGui.EndGroup();
-                tintV = EColor.ToVector4(tint);    // so the cells below pick up a tint edit the same frame
+                shown = tintEnabled ? tint : SColor.White;
+                tintV = EColor.ToVector4(shown);    // so the cells below pick up a tint edit the same frame
                 ImGui.Separator();
             }
 
@@ -820,17 +1145,17 @@ public static class Controls
             {
                 var style = ImGui.GetStyle();
                 float step = cell + style.ItemSpacing.X + style.FramePadding.X * 2;
-                ImGui.BeginChild("##grid", new Vector2(columns * step + 12f, 320f), ImGuiChildFlags.Border);
+                ImGui.BeginChild("##grid", new Vector2(columns * step + 12f, 320f), ImGuiChildFlags.Borders);
                 int col = 0;
                 // transparent cell frames, same as the preview button: a grid of button plates buries the
                 // sprites you're trying to compare. hover/press still highlight.
                 using (new EColor.StyleColorScope((ImGuiCol.Button, 0u)))
-                for (int i = 0; i < sh.Count; i++)
+                for (int i = sh.First; i < sh.First + sh.Count; i++)
                 {
                     var name = sh.Label?.Invoke(i);
-                    if (name != null && !Combo.Matches(filter, name)) continue;
+                    if (name != null && !Text.Matches(filter, name)) continue;
                     var (c0, c1) = CellUv(sh, i);
-                    if (ImGui.ImageButton("c" + i, sh.TexId, new Vector2(cell, cell), c0, c1, Vector4.Zero, tintV))
+                    if (ImGui.ImageButton("c" + i, Tex(sh.TexId), new Vector2(cell, cell), c0, c1, Vector4.Zero, tintV))
                     {
                         sheet = sh.Name;
                         index = i;
@@ -866,10 +1191,10 @@ public static class Controls
         return 0;
     }
 
-    static (Vector2 uv0, Vector2 uv1) CellUv(IconSheet s, int index)
+    internal static (Vector2 uv0, Vector2 uv1) CellUv(IconSheet s, int index)
     {
         if (s.Uv == null || s.Count <= 0) return (Vector2.Zero, Vector2.One);
-        return s.Uv(Math.Clamp(index, 0, s.Count - 1));
+        return s.Uv(Math.Clamp(index, s.First, s.First + s.Count - 1));
     }
 
     // ---- tri-state filter cell ----
@@ -910,13 +1235,13 @@ public static class Controls
         bool changed = false;
         ImGui.PushID(id ?? label);
         uint col = v == 1 ? ImGui.GetColorU32(ImGuiCol.CheckMark)
-                 : v == 2 ? EColor.U32(new SColor(220, 80, 80, 255))
+                 : v == 2 ? EColor.U32(Bad)
                  : ImGui.GetColorU32(ImGuiCol.TextDisabled);
         string glyph = v == 1 ? "+" : v == 2 ? "x" : "-";
 
         float padY = ImGui.GetStyle().FramePadding.Y;
         float rowH = ImGui.GetFrameHeight();     // unscaled, so a grid of these keeps normal row height
-        ImGui.SetWindowFontScale(glyphScale);
+        ImGui.PushFont(ImGui.GetFont(), ImGui.GetStyle().FontSizeBase * glyphScale);
         // the scaled glyph has to FIT the frame: imgui only centres text vertically while there's room,
         // and pins it to the top padding once it overflows (reads as a dropped, top-heavy glyph). so the
         // box grows to the scaled line height when it has to, and stays at row height when it doesn't.
@@ -928,7 +1253,7 @@ public static class Controls
                 v = CycleTri(v, ImGui.GetIO().KeyShift);
                 changed = true;
             }
-        ImGui.SetWindowFontScale(1f);
+        ImGui.PopFont();
         float btnH = ImGui.GetItemRectSize().Y;
         if (ImGui.IsItemClicked(ImGuiMouseButton.Right) && v != 0) { v = 0; changed = true; }
         if (!string.IsNullOrEmpty(label))
@@ -937,7 +1262,7 @@ public static class Controls
             // the two now that the glyph is scaled.
             ImGui.SameLine();
             ImGui.SetCursorPosY(ImGui.GetCursorPosY() + (btnH - ImGui.GetTextLineHeight()) * 0.5f);
-            ImGui.TextUnformatted(Text.Ascii(label));
+            ImGui.TextUnformatted(label);
         }
         ImGui.PopID();
         return changed;

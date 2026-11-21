@@ -7,12 +7,13 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using ExileCore;
+using ExileCore.PoEMemory;
 using ExileCore.PoEMemory.Elements;
 using ExileCore.PoEMemory.Elements.InventoryElements;
 using ExileCore.Shared;
 using ExileCore.Shared.Enums;
 using Humanizer;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SharpDX;
 using Vector2 = System.Numerics.Vector2;
 
@@ -314,6 +315,56 @@ public sealed partial class ClickExecutor
             _aimPoint.X + (float)(_rng.NextDouble() - 0.5) * 2f * JiggleRadius,
             _aimPoint.Y + (float)(_rng.NextDouble() - 0.5) * 2f * JiggleRadius));
     }
+
+    #region Mouseless - ExileTools.ClickItem through PluginBridge
+
+    bool _mouseless;
+
+    static T Bridge<T>(string name) where T : class =>
+        ExileCrafting.Main.GameController.PluginBridge.GetMethod<T>(name);
+
+    public static bool MouselessAvailable =>
+        Bridge<Func<string, bool>>("ExileTools.Ready")?.Invoke("ClickItem") == true;
+
+    void ChooseInput() =>
+        _mouseless = ExileCrafting.Main.Settings.Mouseless.Value && CraftingSlot.Mode != CraftType.Harvest && MouselessAvailable;
+
+    IEnumerable BridgeClick(NormalInventoryItem item, int button, int mods)
+    {
+        _pollResult = false;
+        var log = ExileCrafting.Main.CraftLog;
+
+        var click = Bridge<Func<Element, int, int, Task<int>>>("ExileTools.ClickItem");
+        if (click == null)
+        {
+            log.Add("aborted: ExileTools went away mid-run.");
+            yield break;
+        }
+
+        var task = click(item, button, mods);
+        while (!task.IsCompleted) yield return new WaitTime(PollIntervalMs);
+
+        _pollResult = task.IsCompletedSuccessfully && task.Result == 0;
+        if (_pollResult) yield break;
+
+        var why = Bridge<Func<string>>("ExileTools.LastRefusal")?.Invoke();
+        log.Add($"aborted: ExileTools refused the click - {(string.IsNullOrEmpty(why) ? $"code {(task.IsCompletedSuccessfully ? task.Result : -1)}" : why)}.");
+    }
+
+    // either input, _pollResult says whether the click went out
+    IEnumerable LeftClickSlot()
+    {
+        if (_mouseless)
+        {
+            foreach (var step in BridgeClick(_slot, 0, 0)) yield return step;
+            yield break;
+        }
+
+        foreach (var step in ClickButton(MouseButtons.Left)) yield return step;
+        _pollResult = true;
+    }
+
+    #endregion
 
     static Vector2 Center(RectangleF rect) =>
         ToScreen(new Vector2(rect.X + rect.Width / 2f, rect.Y + rect.Height / 2f));

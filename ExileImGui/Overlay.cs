@@ -1,6 +1,6 @@
 using System;
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SColor = SharpDX.Color;
 
 namespace ExileImGui;
@@ -125,9 +125,9 @@ public sealed class Overlay
         var (hovered, _) = HitTest(mouse, origin, size);
         var edge = HitEdge(mouse, origin, size, enabled);
         var shown = _resizeId == id ? _resizeEdge : edge;
-        if (shown == ResizeEdge.Corner) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNWSE);
-        else if (shown == ResizeEdge.Right) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEW);
-        else if (shown == ResizeEdge.Bottom) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNS);
+        if (shown == ResizeEdge.Corner) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNwse);
+        else if (shown == ResizeEdge.Right) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEw);
+        else if (shown == ResizeEdge.Bottom) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeNs);
 
         if (_dragId == null && _resizeId == null && hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
@@ -176,7 +176,7 @@ public sealed class Overlay
 
         var mouse = ImGui.GetMousePos();
         var (hovered, onEdge) = HitTest(mouse, min, size);
-        if (onEdge || _resizeId == id) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEW);
+        if (onEdge || _resizeId == id) ImGui.SetMouseCursor(ImGuiMouseCursor.ResizeEw);
 
         if (_dragId == null && _resizeId == null && hovered && ImGui.IsMouseClicked(ImGuiMouseButton.Left))
         {
@@ -223,7 +223,7 @@ public sealed class Overlay
         float thickness = 1f, float radius = 0f)
     {
         if (background.A > 0) dl.AddRectFilled(min, max, EColor.U32(background), radius);
-        if (thickness > 0) dl.AddRect(min, max, EColor.U32(border), radius, ImDrawFlags.None, thickness);
+        if (thickness > 0) dl.AddRect(min, max, EColor.U32(border), radius, thickness);
     }
 
     /// <summary>
@@ -251,7 +251,7 @@ public sealed class Overlay
     {
         var hint = (active || hovered) ? new SColor(120, 220, 255, 220) : new SColor(120, 220, 255, 120);
         var dl = ImGui.GetForegroundDrawList();
-        dl.AddRect(min, max, EColor.U32(hint), 0f, ImDrawFlags.None, 1.5f);
+        dl.AddRect(min, max, EColor.U32(hint), 0f, 1.5f);
         var grip = EColor.U32(new SColor(120, 220, 255, 255));
         if ((edge & ResizeEdge.Right) != 0)
             dl.AddLine(new Vector2(max.X, min.Y), new Vector2(max.X, max.Y), grip, 3f);

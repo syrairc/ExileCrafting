@@ -1,5 +1,5 @@
 using System.Numerics;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using SColor = SharpDX.Color;
 
 namespace ExileImGui;
@@ -19,7 +19,7 @@ public static class RichText
     /// </summary>
     /// <param name="font">Font to draw with, and <paramref name="size"/> its pixel size - pass
     /// ImGui.GetFont()/GetFontSize() to match the game font scale.</param>
-    public static void Outlined(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 pos, string text, SColor color)
+    public static unsafe void Outlined(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 pos, string text, SColor color)
     {
         uint black = ImGui.GetColorU32(new Vector4(0, 0, 0, 1f));
         foreach (var o in Outline) dl.AddText(font, size, pos + o, black, text);
@@ -32,7 +32,7 @@ public static class RichText
     /// <param name="pos">Top-left of the text itself; the pill extends outward by the padding.</param>
     /// <param name="bg">Box fill. A zero alpha draws the text alone.</param>
     /// <returns>The outer pill size, so callers can advance or lay out around it.</returns>
-    public static Vector2 Pill(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 pos, string text,
+    public static unsafe Vector2 Pill(ImDrawListPtr dl, ImFontPtr font, float size, Vector2 pos, string text,
         SColor textColor, SColor bg, float padX = 4f, float padY = 2f, float rounding = 2f)
     {
         var ts = font.CalcTextSizeA(size, float.MaxValue, 0f, text);
@@ -51,6 +51,6 @@ public static class RichText
         float thickness = 3f, float rounding = 0f, float expand = 2f)
     {
         var e = new Vector2(expand, expand);
-        dl.AddRect(min - e, max + e, EColor.U32(color), rounding, ImDrawFlags.None, thickness);
+        dl.AddRect(min - e, max + e, EColor.U32(color), rounding, thickness);
     }
 }

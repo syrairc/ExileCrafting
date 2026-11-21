@@ -1,7 +1,7 @@
 using ExileCore.PoEMemory.FilesInMemory;
 using ExileCore.Shared.Enums;
 using ExileImGui;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using Microsoft.CodeAnalysis.CSharp.Scripting;
 using Microsoft.CodeAnalysis.Scripting;
 using Microsoft.CodeAnalysis;
@@ -766,7 +766,7 @@ public sealed class ScriptEditorDialog
                 "data/harvest-crafts.txt is missing or empty."),
         };
 
-        ImGui.BeginChild("##pickerpanel", new Vector2(0f, 340f), ImGuiChildFlags.Border);
+        ImGui.BeginChild("##pickerpanel", new Vector2(0f, 340f), ImGuiChildFlags.Borders);
 
         if (rows.Count == 0)
         {

@@ -2,7 +2,7 @@ using ExileCore.Shared.Attributes;
 using ExileCore.Shared.Interfaces;
 using ExileCore.Shared.Nodes;
 using ExileImGui;
-using ImGuiNET;
+using Hexa.NET.ImGui;
 using System.Collections.Generic;
 using System.Linq;
 using System.Windows.Forms;
@@ -29,6 +29,12 @@ public class ExileCraftingSettings : ISettings
     public HotkeyNodeV2 AbortHotkey { get; set; } = new(Keys.Escape);
     public HotkeyNodeV2 PauseHotkey { get; set; } = new(Keys.Space);
     public ToggleNode RestrictedMode { get; set; } = new ToggleNode(false);
+    // drawn by hand in the Crafting Tooltip tab
+    [IgnoreMenu] public ToggleNode ShowCraftOdds { get; set; } = new ToggleNode(true);
+    [IgnoreMenu] public ToggleNode OddsShowTiers { get; set; } = new ToggleNode(true);
+    [IgnoreMenu] public RangeNode<int> OddsLineBudget { get; set; } = new(44, 8, 120);
+    [IgnoreMenu] public RangeNode<float> OddsTierScale { get; set; } = new(0.8f, 0.5f, 1f);
+    [IgnoreMenu] public RangeNode<int> OddsGap { get; set; } = new(6, 0, 80);
     public HotkeyNodeV2 ToggleSlotHotkey { get; set; } = new(Keys.Add);
 
     // slot keys from CraftingSlot.SlotKey - hand-picked in game, not in the menu
@@ -51,6 +57,7 @@ public class ExileCraftingSettings : ISettings
 
     // everything below is drawn by hand in the Humanizer tab - IgnoreMenu keeps the auto-built
     // menu from listing them twice, the nodes still save and load normally.
+    [IgnoreMenu] public ToggleNode Mouseless { get; set; } = new ToggleNode(true);
     [IgnoreMenu] public RangeNode<int> Preset { get; set; } = new((int)HumanizerPreset.Normal, 0, 4);
     [IgnoreMenu] public RangeNode<float> Gravity { get; set; } = new(11f, 1f, 30f);
     [IgnoreMenu] public RangeNode<float> Wind { get; set; } = new(3f, 0f, 15f);
@@ -175,6 +182,17 @@ public static class HumanizerSettingsTab
 
     public static bool Draw(ExileCraftingSettings settings)
     {
+        var mouseless = settings.Mouseless.Value;
+        var toggled = ImGui.Checkbox("Mouseless (ExileTools)", ref mouseless);
+        if (toggled) settings.Mouseless.Value = mouseless;
+        Controls.Tip("Clicks items through ExileTools without moving the cursor.\n" +
+                     "Harvest always uses the mouse.");
+        if (settings.Mouseless.Value)
+            ImGui.TextDisabled(ClickExecutor.MouselessAvailable
+                ? "ExileTools ready."
+                : "ExileTools not loaded - using the mouse settings below.");
+        ImGui.Separator();
+
         ImGui.TextWrapped("Timings. Off moves the cursor straight to the target and runs with no " +
                           "delays at all - fastest, and the most obvious.");
         ImGui.Separator();
@@ -194,7 +212,7 @@ public static class HumanizerSettingsTab
         {
             ImGui.Separator();
             ImGui.TextDisabled("Humanizer is off - the values below are kept, but nothing reads them.");
-            return false;
+            return toggled;
         }
 
         ImGui.Separator();
@@ -255,7 +273,7 @@ public static class HumanizerSettingsTab
             "what they just made.");
 
         if (changed) settings.Preset.Value = (int)HumanizerPreset.Custom;
-        return changed;
+        return changed || toggled;
     }
 
     // min/max pair kept ordered, so dragging one past the other doesn't invert the range
@@ -307,7 +325,7 @@ public static class SoundSettingsTab
     {
         _files ??= Sounds.Files();
 
-        ImGui.TextWrapped(Text.Ascii($"wav files are read from {Sounds.Folder}"));
+        ImGui.TextWrapped($"wav files are read from {Sounds.Folder}");
         if (ImGui.SmallButton("Rescan")) _files = Sounds.Files();
 
         ImGui.Separator();
@@ -380,6 +398,65 @@ public static class SoundSettingsTab
         }
 
         ImGui.EndTable();
+        return changed;
+    }
+}
+
+#endregion
+
+#region Crafting Tooltip tab (the odds panel)
+
+public static class CraftOddsSettingsTab
+{
+    public static bool Draw(ExileCraftingSettings settings)
+    {
+        ImGui.TextWrapped("Hold an Orb of Augmentation or an Exalted Orb and hover an item to see " +
+                          "what it could roll, grouped by mod family and sorted by chance.");
+        ImGui.Separator();
+
+        var changed = false;
+
+        var show = settings.ShowCraftOdds.Value;
+        if (ImGui.Checkbox("Show the odds panel", ref show))
+        {
+            settings.ShowCraftOdds.Value = show;
+            changed = true;
+        }
+
+        if (!settings.ShowCraftOdds.Value)
+        {
+            ImGui.Separator();
+            ImGui.TextDisabled("Panel is off - the values below are kept, but nothing reads them.");
+            return changed;
+        }
+
+        var tiers = settings.OddsShowTiers.Value;
+        if (ImGui.Checkbox("List every tier under its group", ref tiers))
+        {
+            settings.OddsShowTiers.Value = tiers;
+            changed = true;
+        }
+        Controls.Tip("Off shows only the group headings and their combined chance,\n" +
+                     "which fits a full rare on screen.");
+
+        if (settings.OddsShowTiers.Value)
+        {
+            changed |= Controls.SliderFloat("Tier text size",
+                () => settings.OddsTierScale.Value, v => settings.OddsTierScale.Value = v,
+                0.5f, 1f, "oddstierscale", "%.2f");
+            Controls.Tip("Relative to the group heading.");
+        }
+
+        changed |= Controls.SliderInt("Max rows",
+            () => settings.OddsLineBudget.Value, v => settings.OddsLineBudget.Value = v,
+            8, 120, "oddslinebudget");
+        Controls.Tip("Headings and tiers both count as a row. A group is never cut in half,\n" +
+                     "so the panel can run a little past this. What doesn't fit is summarised.");
+
+        changed |= Controls.SliderInt("Gap from the item tooltip",
+            () => settings.OddsGap.Value, v => settings.OddsGap.Value = v,
+            0, 80, "oddsgap");
+
         return changed;
     }
 }
